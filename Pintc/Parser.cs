@@ -290,7 +290,188 @@ class Parser(List<Token> tokens)
         return new CallStmt(callee.Text, args);
     }
 
-    Expr? ParseExpr()
+    Expr? ParseExpr() => ParseOrExpr();
+
+    Expr? ParseOrExpr()
+    {
+        var left = ParseAndExpr();
+        if (left is null) return null;
+        while (Check(TokenKind.Or))
+        {
+            Advance();
+            var right = ParseAndExpr();
+            if (right is null) return null;
+            left = new BinaryExpr(BinaryOp.Or, left, right);
+        }
+        return left;
+    }
+
+    Expr? ParseAndExpr()
+    {
+        var left = ParseBitwiseOrExpr();
+        if (left is null) return null;
+        while (Check(TokenKind.And))
+        {
+            Advance();
+            var right = ParseBitwiseOrExpr();
+            if (right is null) return null;
+            left = new BinaryExpr(BinaryOp.And, left, right);
+        }
+        return left;
+    }
+
+    Expr? ParseBitwiseOrExpr()
+    {
+        var left = ParseXorExpr();
+        if (left is null) return null;
+        while (Check(TokenKind.Pipe))
+        {
+            Advance();
+            var right = ParseXorExpr();
+            if (right is null) return null;
+            left = new BinaryExpr(BinaryOp.BitOr, left, right);
+        }
+        return left;
+    }
+
+    Expr? ParseXorExpr()
+    {
+        var left = ParseBitwiseAndExpr();
+        if (left is null) return null;
+        while (Check(TokenKind.Xor))
+        {
+            Advance();
+            var right = ParseBitwiseAndExpr();
+            if (right is null) return null;
+            left = new BinaryExpr(BinaryOp.BitXor, left, right);
+        }
+        return left;
+    }
+
+    Expr? ParseBitwiseAndExpr()
+    {
+        var left = ParseEqualityExpr();
+        if (left is null) return null;
+        while (Check(TokenKind.Amp))
+        {
+            Advance();
+            var right = ParseEqualityExpr();
+            if (right is null) return null;
+            left = new BinaryExpr(BinaryOp.BitAnd, left, right);
+        }
+        return left;
+    }
+
+    Expr? ParseEqualityExpr()
+    {
+        var left = ParseCompareExpr();
+        if (left is null) return null;
+        while (Check(TokenKind.EqEq) || Check(TokenKind.BangEq))
+        {
+            var op = Current.Kind == TokenKind.EqEq ? BinaryOp.Eq : BinaryOp.Ne;
+            Advance();
+            var right = ParseCompareExpr();
+            if (right is null) return null;
+            left = new BinaryExpr(op, left, right);
+        }
+        return left;
+    }
+
+    Expr? ParseCompareExpr()
+    {
+        var left = ParseShiftExpr();
+        if (left is null) return null;
+        while (Check(TokenKind.Lt) || Check(TokenKind.LtEq) || Check(TokenKind.Gt) || Check(TokenKind.GtEq))
+        {
+            var op = Current.Kind switch
+            {
+                TokenKind.Lt   => BinaryOp.Lt,
+                TokenKind.LtEq => BinaryOp.Le,
+                TokenKind.Gt   => BinaryOp.Gt,
+                _              => BinaryOp.Ge,
+            };
+            Advance();
+            var right = ParseShiftExpr();
+            if (right is null) return null;
+            left = new BinaryExpr(op, left, right);
+        }
+        return left;
+    }
+
+    Expr? ParseShiftExpr()
+    {
+        var left = ParseAddExpr();
+        if (left is null) return null;
+        while (Check(TokenKind.LtLt) || Check(TokenKind.GtGt))
+        {
+            var op = Current.Kind == TokenKind.LtLt ? BinaryOp.Shl : BinaryOp.Shr;
+            Advance();
+            var right = ParseAddExpr();
+            if (right is null) return null;
+            left = new BinaryExpr(op, left, right);
+        }
+        return left;
+    }
+
+    Expr? ParseAddExpr()
+    {
+        var left = ParseMultExpr();
+        if (left is null) return null;
+        while (Check(TokenKind.Plus) || Check(TokenKind.Minus))
+        {
+            var op = Current.Kind == TokenKind.Plus ? BinaryOp.Add : BinaryOp.Sub;
+            Advance();
+            var right = ParseMultExpr();
+            if (right is null) return null;
+            left = new BinaryExpr(op, left, right);
+        }
+        return left;
+    }
+
+    Expr? ParseMultExpr()
+    {
+        var left = ParseUnaryExpr();
+        if (left is null) return null;
+        while (Check(TokenKind.Star) || Check(TokenKind.Slash) || Check(TokenKind.Percent))
+        {
+            var op = Current.Kind switch
+            {
+                TokenKind.Star    => BinaryOp.Mul,
+                TokenKind.Slash   => BinaryOp.Div,
+                _                 => BinaryOp.Mod,
+            };
+            Advance();
+            var right = ParseUnaryExpr();
+            if (right is null) return null;
+            left = new BinaryExpr(op, left, right);
+        }
+        return left;
+    }
+
+    Expr? ParseUnaryExpr()
+    {
+        if (Check(TokenKind.Minus))
+        {
+            Advance();
+            var operand = ParseUnaryExpr();
+            return operand is null ? null : new UnaryExpr(UnaryOp.Neg, operand);
+        }
+        if (Check(TokenKind.Tilde))
+        {
+            Advance();
+            var operand = ParseUnaryExpr();
+            return operand is null ? null : new UnaryExpr(UnaryOp.BitNot, operand);
+        }
+        if (Check(TokenKind.Not))
+        {
+            Advance();
+            var operand = ParseUnaryExpr();
+            return operand is null ? null : new UnaryExpr(UnaryOp.Not, operand);
+        }
+        return ParsePrimaryExpr();
+    }
+
+    Expr? ParsePrimaryExpr()
     {
         if (Check(TokenKind.IntLit))
         {
@@ -304,8 +485,20 @@ class Parser(List<Token> tokens)
             return new IntLiteralExpr(value);
         }
 
+        if (Check(TokenKind.True))  { Advance(); return new BoolLiteralExpr(true);  }
+        if (Check(TokenKind.False)) { Advance(); return new BoolLiteralExpr(false); }
+
         if (Check(TokenKind.Ident))
             return new VarRefExpr(Advance().Text);
+
+        if (Check(TokenKind.LParen))
+        {
+            Advance();
+            var inner = ParseExpr();
+            if (inner is null) return null;
+            if (Eat(TokenKind.RParen) is null) return null;
+            return inner;
+        }
 
         Error($"expected expression, got '{Current.Text}'");
         return null;

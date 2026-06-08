@@ -48,4 +48,44 @@ static class X86
 
     // leave — mov esp,ebp; pop ebp (standard frame teardown)
     public static byte[] Leave() => [0xC9];
+
+    // pop eax / pop ecx — pop TOS into a register
+    public static byte[] PopEax() => [0x58];
+    public static byte[] PopEcx() => [0x59];
+
+    // push eax / push edx — push a register onto the stack
+    public static byte[] PushEax() => [0x50];
+    public static byte[] PushEdx() => [0x52];
+
+    // Integer arithmetic (operands pre-loaded: left→EAX, right→ECX)
+    public static byte[] AddEaxEcx()  => [0x03, 0xC1];
+    public static byte[] SubEaxEcx()  => [0x2B, 0xC1];
+    public static byte[] ImulEaxEcx() => [0x0F, 0xAF, 0xC1];
+    public static byte[] XorEdxEdx()  => [0x33, 0xD2]; // zero EDX before div
+    public static byte[] DivEcx()     => [0xF7, 0xF1]; // unsigned: EAX=quotient, EDX=remainder
+    public static byte[] NegEax()     => [0xF7, 0xD8]; // two's complement negation
+    public static byte[] NotEax()     => [0xF7, 0xD0]; // bitwise complement
+
+    // Bitwise (operands pre-loaded: left→EAX, right→ECX)
+    public static byte[] AndEaxEcx() => [0x23, 0xC1];
+    public static byte[] OrEaxEcx()  => [0x0B, 0xC1];
+    public static byte[] XorEaxEcx() => [0x33, 0xC1];
+
+    // Shifts (value in EAX, count in CL)
+    public static byte[] ShlEaxCl() => [0xD3, 0xE0]; // logical left
+    public static byte[] ShrEaxCl() => [0xD3, 0xE8]; // logical right (unsigned)
+    public static byte[] SarEaxCl() => [0xD3, 0xF8]; // arithmetic right (signed)
+
+    // Comparison and condition codes (operands pre-loaded: left→EAX, right→ECX)
+    public static byte[] CmpEaxEcx()  => [0x3B, 0xC1];
+    public static byte[] SeteAl()     => [0x0F, 0x94, 0xC0]; // ZF=1
+    public static byte[] SetneAl()    => [0x0F, 0x95, 0xC0]; // ZF=0
+    public static byte[] SetbAl()     => [0x0F, 0x92, 0xC0]; // CF=1   (unsigned <)
+    public static byte[] SetbeAl()    => [0x0F, 0x96, 0xC0]; // CF|ZF  (unsigned <=)
+    public static byte[] SetaAl()     => [0x0F, 0x97, 0xC0]; // !CF&!ZF (unsigned >)
+    public static byte[] SetaeAl()    => [0x0F, 0x93, 0xC0]; // !CF    (unsigned >=)
+    public static byte[] MovzxEaxAl() => [0x0F, 0xB6, 0xC0]; // zero-extend AL into EAX
+
+    // xor eax, 1 — inverts a bool (0→1, 1→0)
+    public static byte[] XorEaxOne() => [0x83, 0xF0, 0x01];
 }

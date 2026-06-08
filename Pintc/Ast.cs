@@ -9,9 +9,23 @@ record Attr(string Name, Dictionary<string, string> Args)
 
 record Param(string Name, string TypeName);
 
+enum BinaryOp
+{
+    Add, Sub, Mul, Div, Mod,
+    BitAnd, BitOr, BitXor,
+    And, Or,
+    Shl, Shr,
+    Eq, Ne, Lt, Le, Gt, Ge,
+}
+
+enum UnaryOp { Neg, BitNot, Not }
+
 abstract record Expr;
 record IntLiteralExpr(long Value) : Expr;
+record BoolLiteralExpr(bool Value) : Expr;
 record VarRefExpr(string Name) : Expr;
+record BinaryExpr(BinaryOp Op, Expr Left, Expr Right) : Expr;
+record UnaryExpr(UnaryOp Op, Expr Operand) : Expr;
 
 abstract record Stmt;
 record CallStmt(string Callee, List<Expr> Args) : Stmt;

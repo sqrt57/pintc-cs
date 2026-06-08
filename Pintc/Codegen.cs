@@ -61,6 +61,9 @@ static class Codegen
         return (varVas, data);
     }
 
+    // All local variable stack slots are dword-sized; type size governs .data layout only.
+    static int StackSlotSize(string _) => 4;
+
     static int TypeSize(string typeName) => typeName switch
     {
         "u8"  or "i8"  or "bool" or "byte" => 1,
@@ -87,8 +90,8 @@ static class Codegen
         foreach (var stmt in fun.Body)
         {
             if (stmt is not LocalVarDecl lv) continue;
-            localBytes        += TypeSize(lv.TypeName);
-            localOffsets[lv.Name] = -localBytes;
+            localBytes            += StackSlotSize(lv.TypeName);
+            localOffsets[lv.Name]  = -localBytes;
         }
 
         // Emit a frame when the function has locals or is a regular (non-entry) function.
@@ -136,8 +139,8 @@ static class Codegen
         Dictionary<string, uint> varVas,
         List<byte> code)
     {
-        if (decl.Init is null) return; // slot is uninitialized
-        code.AddRange(EmitExpr(decl.Init, varVas, localOffsets));
+        if (decl.Init is null) return;
+        EmitExpr(decl.Init, varVas, localOffsets, code);
         code.AddRange(X86.PopToEbpDisp8((sbyte)localOffsets[decl.Name]));
     }
 
@@ -158,21 +161,98 @@ static class Codegen
 
         // stdcall: push arguments right-to-left; callee cleans up.
         for (int i = stmt.Args.Count - 1; i >= 0; i--)
-            code.AddRange(EmitExpr(stmt.Args[i], varVas, localOffsets));
+            EmitExpr(stmt.Args[i], varVas, localOffsets, code);
 
         int iatOffset = code.Count + X86.CallIndirectMemAddressOffset;
         code.AddRange(X86.CallIndirectMem());
         iatRefs.Add(new IatRef(iatOffset, importSpec));
     }
 
-    static byte[] EmitExpr(Expr expr, Dictionary<string, uint> varVas, Dictionary<string, int> localOffsets) => expr switch
+    static void EmitExpr(Expr expr, Dictionary<string, uint> varVas, Dictionary<string, int> localOffsets, List<byte> code)
     {
-        // Fits in sign-extended imm8 (0–127): use the 2-byte encoding.
-        IntLiteralExpr { Value: >= 0 and <= 127 } e                     => X86.PushImm8((byte)e.Value),
-        IntLiteralExpr e                                                 => X86.PushImm32((uint)e.Value),
-        VarRefExpr v when localOffsets.TryGetValue(v.Name, out int off) => X86.PushEbpDisp8((sbyte)off),
-        VarRefExpr v when varVas.TryGetValue(v.Name, out uint va)       => X86.PushMem32(va),
-        VarRefExpr v => throw new InvalidOperationException($"Undefined variable '{v.Name}'"),
-        _ => throw new NotSupportedException($"Unsupported expression type: {expr.GetType().Name}"),
-    };
+        switch (expr)
+        {
+            case IntLiteralExpr { Value: >= 0 and <= 127 } e:
+                code.AddRange(X86.PushImm8((byte)e.Value));
+                break;
+            case IntLiteralExpr e:
+                code.AddRange(X86.PushImm32((uint)e.Value));
+                break;
+            case BoolLiteralExpr { Value: true }:
+                code.AddRange(X86.PushImm8(1));
+                break;
+            case BoolLiteralExpr { Value: false }:
+                code.AddRange(X86.PushImm8(0));
+                break;
+            case VarRefExpr v when localOffsets.TryGetValue(v.Name, out int off):
+                code.AddRange(X86.PushEbpDisp8((sbyte)off));
+                break;
+            case VarRefExpr v when varVas.TryGetValue(v.Name, out uint va):
+                code.AddRange(X86.PushMem32(va));
+                break;
+            case VarRefExpr v:
+                throw new InvalidOperationException($"Undefined variable '{v.Name}'");
+            case UnaryExpr u:
+                EmitExpr(u.Operand, varVas, localOffsets, code);
+                code.AddRange(X86.PopEax());
+                switch (u.Op)
+                {
+                    case UnaryOp.Neg:    code.AddRange(X86.NegEax());    break;
+                    case UnaryOp.BitNot: code.AddRange(X86.NotEax());    break;
+                    case UnaryOp.Not:    code.AddRange(X86.XorEaxOne()); break;
+                }
+                code.AddRange(X86.PushEax());
+                break;
+            case BinaryExpr b:
+                EmitExpr(b.Left,  varVas, localOffsets, code);
+                EmitExpr(b.Right, varVas, localOffsets, code);
+                code.AddRange(X86.PopEcx()); // right
+                code.AddRange(X86.PopEax()); // left
+                EmitBinaryOp(b.Op, code);
+                break;
+            default:
+                throw new NotSupportedException($"Unsupported expression type: {expr.GetType().Name}");
+        }
+    }
+
+    static void EmitBinaryOp(BinaryOp op, List<byte> code)
+    {
+        switch (op)
+        {
+            case BinaryOp.Add:
+                code.AddRange(X86.AddEaxEcx());  code.AddRange(X86.PushEax()); break;
+            case BinaryOp.Sub:
+                code.AddRange(X86.SubEaxEcx());  code.AddRange(X86.PushEax()); break;
+            case BinaryOp.Mul:
+                code.AddRange(X86.ImulEaxEcx()); code.AddRange(X86.PushEax()); break;
+            case BinaryOp.Div:
+                code.AddRange(X86.XorEdxEdx()); code.AddRange(X86.DivEcx()); code.AddRange(X86.PushEax()); break;
+            case BinaryOp.Mod:
+                code.AddRange(X86.XorEdxEdx()); code.AddRange(X86.DivEcx()); code.AddRange(X86.PushEdx()); break;
+            case BinaryOp.BitAnd:
+            case BinaryOp.And:
+                code.AddRange(X86.AndEaxEcx()); code.AddRange(X86.PushEax()); break;
+            case BinaryOp.BitOr:
+            case BinaryOp.Or:
+                code.AddRange(X86.OrEaxEcx());  code.AddRange(X86.PushEax()); break;
+            case BinaryOp.BitXor:
+                code.AddRange(X86.XorEaxEcx()); code.AddRange(X86.PushEax()); break;
+            case BinaryOp.Shl:
+                code.AddRange(X86.ShlEaxCl()); code.AddRange(X86.PushEax()); break;
+            case BinaryOp.Shr:
+                code.AddRange(X86.ShrEaxCl()); code.AddRange(X86.PushEax()); break;
+            case BinaryOp.Eq:
+                code.AddRange(X86.CmpEaxEcx()); code.AddRange(X86.SeteAl());  code.AddRange(X86.MovzxEaxAl()); code.AddRange(X86.PushEax()); break;
+            case BinaryOp.Ne:
+                code.AddRange(X86.CmpEaxEcx()); code.AddRange(X86.SetneAl()); code.AddRange(X86.MovzxEaxAl()); code.AddRange(X86.PushEax()); break;
+            case BinaryOp.Lt:
+                code.AddRange(X86.CmpEaxEcx()); code.AddRange(X86.SetbAl());  code.AddRange(X86.MovzxEaxAl()); code.AddRange(X86.PushEax()); break;
+            case BinaryOp.Le:
+                code.AddRange(X86.CmpEaxEcx()); code.AddRange(X86.SetbeAl()); code.AddRange(X86.MovzxEaxAl()); code.AddRange(X86.PushEax()); break;
+            case BinaryOp.Gt:
+                code.AddRange(X86.CmpEaxEcx()); code.AddRange(X86.SetaAl());  code.AddRange(X86.MovzxEaxAl()); code.AddRange(X86.PushEax()); break;
+            case BinaryOp.Ge:
+                code.AddRange(X86.CmpEaxEcx()); code.AddRange(X86.SetaeAl()); code.AddRange(X86.MovzxEaxAl()); code.AddRange(X86.PushEax()); break;
+        }
+    }
 }
