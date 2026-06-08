@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using Pintc;
 
 var args_ = args; // top-level args
 
@@ -47,5 +48,27 @@ if (!File.Exists(inputFile))
 
 outputFile ??= Path.ChangeExtension(inputFile, ".exe");
 
-Console.Error.WriteLine($"pintc: not implemented (would compile '{inputFile}' -> '{outputFile}')");
-return 1;
+var source = File.ReadAllText(inputFile);
+
+var lexer = new Lexer(source);
+var tokens = lexer.Tokenize();
+if (lexer.Diagnostics.Count > 0)
+{
+    foreach (var d in lexer.Diagnostics)
+        Console.Error.WriteLine($"{inputFile}: error: {d.Message}");
+    return 1;
+}
+
+var parser = new Parser(tokens);
+var module = parser.ParseModule();
+if (module is null || parser.Diagnostics.Count > 0)
+{
+    foreach (var d in parser.Diagnostics)
+        Console.Error.WriteLine($"{inputFile}: error: {d.Message}");
+    return 1;
+}
+
+var unit = Codegen.Emit(module);
+using var output = File.Create(outputFile);
+PeWriter.Write(unit, output);
+return 0;
