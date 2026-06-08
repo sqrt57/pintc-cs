@@ -20,4 +20,8 @@
     <Using Include="Shouldly" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\Pintc.TestFixtures\Pintc.TestFixtures.csproj" />
+  </ItemGroup>
+
 </Project>

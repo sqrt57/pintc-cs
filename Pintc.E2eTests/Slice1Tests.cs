@@ -1,4 +1,5 @@
 using Pintc.E2eTests.Helpers;
+using Pintc.TestFixtures;
 
 namespace Pintc.E2eTests;
 
@@ -9,27 +10,12 @@ public class Slice1Tests : IDisposable
     public Slice1Tests() => Directory.CreateDirectory(_tempDir);
     public void Dispose() => Directory.Delete(_tempDir, recursive: true);
 
-    const string Source = """
-        module main {
-
-            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
-            [noreturn]
-            extern fun exit_process(code: u32) -> ();
-
-            [win32_entry]
-            [noreturn]
-            fun main() -> () {
-                exit_process(0);
-            }
-        }
-        """;
-
     [Fact]
     public void Compiles_and_exits_with_0()
     {
         var sourcePath = Path.Combine(_tempDir, "slice1.pnt");
         var exePath    = Path.Combine(_tempDir, "slice1.exe");
-        File.WriteAllText(sourcePath, Source);
+        File.WriteAllText(sourcePath, SliceFixtures.Slice1Source);
 
         var compile = CompilerRunner.Compile(sourcePath, exePath);
         compile.ExitCode.ShouldBe(0, compile.Stderr);

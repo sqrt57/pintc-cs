@@ -22,6 +22,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Pintc\Pintc.csproj" />
+    <ProjectReference Include="..\Pintc.TestFixtures\Pintc.TestFixtures.csproj" />
   </ItemGroup>
 
 </Project>
