@@ -76,6 +76,14 @@ if (resolveResult.Diagnostics.Count > 0)
     return 1;
 }
 
+var typeErrors = TypeChecker.Check(module, resolveResult);
+if (typeErrors.Count > 0)
+{
+    foreach (var d in typeErrors)
+        Console.Error.WriteLine($"{inputFile}: error: {d.Message}");
+    return 1;
+}
+
 var unit = Codegen.Emit(module);
 using var output = File.Create(outputFile);
 PeWriter.Write(unit, output);
