@@ -13,6 +13,19 @@ static class X86
     public static byte[] CallIndirectMem() => [0xFF, 0x15, 0x00, 0x00, 0x00, 0x00];
     public const int CallIndirectMemAddressOffset = 2;
 
+    // push imm32 — pushes a sign-extended 32-bit immediate value
+    public static byte[] PushImm32(uint value) =>
+        [0x68, (byte)(value & 0xFF), (byte)(value >> 8 & 0xFF), (byte)(value >> 16 & 0xFF), (byte)(value >> 24)];
+
+    // push ebp — saves caller's frame pointer
+    public static byte[] PushEbp() => [0x55];
+
+    // mov ebp, esp — sets up the new frame pointer
+    public static byte[] MovEbpEsp() => [0x89, 0xE5];
+
+    // pop ebp — restores caller's frame pointer
+    public static byte[] PopEbp() => [0x5D];
+
     // ret — near return, callee pops nothing
     public static byte[] Ret() => [0xC3];
 
