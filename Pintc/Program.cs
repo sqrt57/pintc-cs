@@ -68,6 +68,14 @@ if (module is null || parser.Diagnostics.Count > 0)
     return 1;
 }
 
+var resolveResult = Resolver.Resolve(module);
+if (resolveResult.Diagnostics.Count > 0)
+{
+    foreach (var d in resolveResult.Diagnostics)
+        Console.Error.WriteLine($"{inputFile}: error: {d.Message}");
+    return 1;
+}
+
 var unit = Codegen.Emit(module);
 using var output = File.Create(outputFile);
 PeWriter.Write(unit, output);
