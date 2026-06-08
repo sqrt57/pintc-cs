@@ -28,6 +28,23 @@ public static class SliceFixtures
         }
         """;
 
+    public const string Slice2Source = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            var exit_code: u32 = 0;
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                exit_process(exit_code);
+            }
+        }
+        """;
+
     public const string Slice1Source = """
         module main {
 
