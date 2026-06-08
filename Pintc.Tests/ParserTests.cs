@@ -80,7 +80,7 @@ public class ParserTests
     {
         var m = Parse("module x { fun main() -> () { exit_process(0); } }");
         m.ShouldNotBeNull();
-        var stmt = m!.Funs[0].Body[0];
+        var stmt = m!.Funs[0].Body[0].ShouldBeOfType<CallStmt>();
         stmt.Callee.ShouldBe("exit_process");
         stmt.Args.ShouldHaveSingleItem();
         stmt.Args[0].ShouldBeOfType<IntLiteralExpr>().Value.ShouldBe(0L);
@@ -96,7 +96,7 @@ public class ParserTests
     {
         var m = Parse($"module x {{ {funSrc} }}");
         m.ShouldNotBeNull();
-        m!.Funs[0].Body[0].Args[0].ShouldBeOfType<IntLiteralExpr>().Value.ShouldBe(expected);
+        m!.Funs[0].Body[0].ShouldBeOfType<CallStmt>().Args[0].ShouldBeOfType<IntLiteralExpr>().Value.ShouldBe(expected);
     }
 
     // ── Error cases ────────────────────────────────────────────────────────────
@@ -138,7 +138,44 @@ public class ParserTests
     {
         var m = Parse("module x { fun f() -> () { g(some_var); } }");
         m.ShouldNotBeNull();
-        m!.Funs[0].Body[0].Args[0].ShouldBeOfType<VarRefExpr>().Name.ShouldBe("some_var");
+        m!.Funs[0].Body[0].ShouldBeOfType<CallStmt>().Args[0].ShouldBeOfType<VarRefExpr>().Name.ShouldBe("some_var");
+    }
+
+    // ── Local var decl ─────────────────────────────────────────────────────────
+
+    [Fact]
+    public void LocalVarDecl_with_initializer()
+    {
+        var m = Parse("module x { fun f() -> () { var x: u32 = 42; } }");
+        m.ShouldNotBeNull();
+        var lv = m!.Funs[0].Body[0].ShouldBeOfType<LocalVarDecl>();
+        lv.Name.ShouldBe("x");
+        lv.TypeName.ShouldBe("u32");
+        lv.Init.ShouldBeOfType<IntLiteralExpr>().Value.ShouldBe(42L);
+    }
+
+    [Fact]
+    public void LocalVarDecl_without_initializer()
+    {
+        var m = Parse("module x { fun f() -> () { var x: u32; } }");
+        m.ShouldNotBeNull();
+        var lv = m!.Funs[0].Body[0].ShouldBeOfType<LocalVarDecl>();
+        lv.Name.ShouldBe("x");
+        lv.TypeName.ShouldBe("u32");
+        lv.Init.ShouldBeNull();
+    }
+
+    [Fact]
+    public void FunDecl_body_with_local_var_then_call()
+    {
+        var m = Parse("module x { fun f() -> () { var x: u32 = 0; g(x); } }");
+        m.ShouldNotBeNull();
+        var body = m!.Funs[0].Body;
+        body.Count.ShouldBe(2);
+        var lv   = body[0].ShouldBeOfType<LocalVarDecl>();
+        lv.Name.ShouldBe("x");
+        var call = body[1].ShouldBeOfType<CallStmt>();
+        call.Args[0].ShouldBeOfType<VarRefExpr>().Name.ShouldBe("x");
     }
 
     // ── Full slice 1 round-trip ────────────────────────────────────────────────
@@ -174,7 +211,7 @@ public class ParserTests
         fun.Params.ShouldBeEmpty();
         fun.ReturnType.ShouldBe("()");
         fun.Body.ShouldHaveSingleItem();
-        var call = fun.Body[0];
+        var call = fun.Body[0].ShouldBeOfType<CallStmt>();
         call.Callee.ShouldBe("exit_process");
         call.Args.ShouldHaveSingleItem();
         call.Args[0].ShouldBeOfType<IntLiteralExpr>().Value.ShouldBe(0L);
@@ -192,7 +229,7 @@ public class ParserTests
         v.TypeName.ShouldBe("u32");
         v.Init.ShouldBeOfType<IntLiteralExpr>().Value.ShouldBe(0L);
 
-        var call = m.Funs[0].Body[0];
+        var call = m.Funs[0].Body[0].ShouldBeOfType<CallStmt>();
         call.Callee.ShouldBe("exit_process");
         call.Args[0].ShouldBeOfType<VarRefExpr>().Name.ShouldBe("exit_code");
     }

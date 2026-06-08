@@ -13,8 +13,9 @@ abstract record Expr;
 record IntLiteralExpr(long Value) : Expr;
 record VarRefExpr(string Name) : Expr;
 
-// A call statement: callee(arg0, arg1, ...)
-record CallStmt(string Callee, List<Expr> Args);
+abstract record Stmt;
+record CallStmt(string Callee, List<Expr> Args) : Stmt;
+record LocalVarDecl(string Name, string TypeName, Expr? Init) : Stmt;
 
 // An extern function imported from a DLL.
 record ExternFunDecl(
@@ -29,7 +30,7 @@ record FunDecl(
     string Name,
     List<Param> Params,
     string ReturnType,
-    List<CallStmt> Body);
+    List<Stmt> Body);
 
 // A module-scope variable declaration.
 record ModuleVarDecl(string Name, string TypeName, Expr? Init);

@@ -21,11 +21,11 @@ static class Resolver
         var diagnostics = new List<Diagnostic>();
         foreach (var fun in module.Funs)
             foreach (var stmt in fun.Body)
-                if (!symbols.ContainsKey(stmt.Callee))
+                if (stmt is CallStmt call && !symbols.ContainsKey(call.Callee))
                     diagnostics.Add(new Diagnostic(
                         Severity.Error,
                         SourceSpan.None,
-                        $"Unknown identifier '{stmt.Callee}'"));
+                        $"Unknown identifier '{call.Callee}'"));
 
         return new ResolveResult(symbols, diagnostics);
     }

@@ -165,10 +165,10 @@ class Parser(List<Token> tokens)
         if (ret is null) return null;
         if (Eat(TokenKind.LBrace) is null) return null;
 
-        var body = new List<CallStmt>();
+        var body = new List<Stmt>();
         while (!Check(TokenKind.RBrace) && !Check(TokenKind.Eof))
         {
-            var stmt = ParseCallStmt();
+            var stmt = ParseStmt();
             if (stmt is null) return null;
             body.Add(stmt);
         }
@@ -244,6 +244,31 @@ class Parser(List<Token> tokens)
         TokenKind.String;
 
     // ── Statements and expressions ─────────────────────────────────────────────
+
+    Stmt? ParseStmt()
+    {
+        if (Check(TokenKind.Var))
+            return ParseLocalVarDecl();
+        return ParseCallStmt();
+    }
+
+    LocalVarDecl? ParseLocalVarDecl()
+    {
+        if (Eat(TokenKind.Var) is null) return null;
+        var name = Eat(TokenKind.Ident);
+        if (name is null) return null;
+        if (Eat(TokenKind.Colon) is null) return null;
+        var type = ParseType();
+        if (type is null) return null;
+        Expr? init = null;
+        if (TryEat(TokenKind.Eq))
+        {
+            init = ParseExpr();
+            if (init is null) return null;
+        }
+        if (Eat(TokenKind.Semicolon) is null) return null;
+        return new LocalVarDecl(name.Text, type, init);
+    }
 
     CallStmt? ParseCallStmt()
     {

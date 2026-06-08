@@ -10,7 +10,8 @@ static class TypeChecker
         {
             foreach (var stmt in fun.Body)
             {
-                if (!resolved.Symbols.TryGetValue(stmt.Callee, out var symbol))
+                if (stmt is not CallStmt call) continue;
+                if (!resolved.Symbols.TryGetValue(call.Callee, out var symbol))
                     continue; // resolver already reported unknown callees
 
                 var expectedArity = symbol switch
@@ -20,11 +21,11 @@ static class TypeChecker
                     _ => throw new InvalidOperationException($"Unknown symbol type: {symbol}")
                 };
 
-                if (stmt.Args.Count != expectedArity)
+                if (call.Args.Count != expectedArity)
                     diagnostics.Add(new Diagnostic(
                         Severity.Error,
                         SourceSpan.None,
-                        $"'{stmt.Callee}' called with {stmt.Args.Count} argument(s) but expects {expectedArity}"));
+                        $"'{call.Callee}' called with {call.Args.Count} argument(s) but expects {expectedArity}"));
             }
         }
 

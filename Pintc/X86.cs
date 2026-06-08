@@ -36,4 +36,16 @@ static class X86
     // ret imm16 — near return, callee pops popBytes bytes (stdcall cleanup)
     public static byte[] RetN(ushort popBytes) =>
         [0xC2, (byte)(popBytes & 0xFF), (byte)(popBytes >> 8)];
+
+    // sub esp, imm8 — allocates bytes on the stack for local variables (fits in 7 bits)
+    public static byte[] SubEspImm8(byte bytes) => [0x83, 0xEC, bytes];
+
+    // push dword ptr [ebp+disp8] — loads a local variable onto the stack
+    public static byte[] PushEbpDisp8(sbyte disp) => [0xFF, 0x75, (byte)disp];
+
+    // pop dword ptr [ebp+disp8] — stores TOS into a local variable slot
+    public static byte[] PopToEbpDisp8(sbyte disp) => [0x8F, 0x45, (byte)disp];
+
+    // leave — mov esp,ebp; pop ebp (standard frame teardown)
+    public static byte[] Leave() => [0xC9];
 }

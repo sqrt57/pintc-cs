@@ -99,4 +99,76 @@ public class CodegenTests
     {
         X86.PushImm32(0x12345678u).ShouldBe(new byte[] { 0x68, 0x78, 0x56, 0x34, 0x12 });
     }
+
+    // ── X86 local-variable helpers ─────────────────────────────────────────────
+
+    [Fact]
+    public void SubEspImm8_emits_correct_bytes()
+    {
+        X86.SubEspImm8(4).ShouldBe(new byte[] { 0x83, 0xEC, 0x04 });
+    }
+
+    [Fact]
+    public void PushEbpDisp8_negative_offset_emits_correct_bytes()
+    {
+        // push dword ptr [ebp-4]: FF 75 FC
+        X86.PushEbpDisp8(-4).ShouldBe(new byte[] { 0xFF, 0x75, 0xFC });
+    }
+
+    [Fact]
+    public void PopToEbpDisp8_negative_offset_emits_correct_bytes()
+    {
+        // pop dword ptr [ebp-4]: 8F 45 FC
+        X86.PopToEbpDisp8(-4).ShouldBe(new byte[] { 0x8F, 0x45, 0xFC });
+    }
+
+    [Fact]
+    public void Leave_emits_C9()
+    {
+        X86.Leave().ShouldBe(new byte[] { 0xC9 });
+    }
+
+    // ── Slice 3 codegen ────────────────────────────────────────────────────────
+
+    [Fact]
+    public void LocalVar_with_initializer_emits_frame_sub_store_load_call()
+    {
+        var module = new ModuleDecl(
+            "main",
+            Externs:
+            [
+                new ExternFunDecl(
+                    [new Attr("dll_import", new() { ["dll"] = "kernel32.dll", ["entry_point"] = "ExitProcess" }),
+                     new Attr("noreturn")],
+                    "exit_process",
+                    [new Param("code", "u32")],
+                    "()")
+            ],
+            Funs:
+            [
+                new FunDecl(
+                    [new Attr("win32_entry"), new Attr("noreturn")],
+                    "main", [], "()",
+                    [
+                        new LocalVarDecl("exit_code", "u32", new IntLiteralExpr(0)),
+                        new CallStmt("exit_process", [new VarRefExpr("exit_code")])
+                    ])
+            ],
+            Vars: []);
+
+        var unit = Codegen.Emit(module);
+
+        // push ebp (55) + mov ebp,esp (89 E5) + sub esp,4 (83 EC 04)
+        // + push 0 (6A 00) + pop [ebp-4] (8F 45 FC)
+        // + push [ebp-4] (FF 75 FC) + call [IAT] (FF 15 00 00 00 00)
+        unit.Code.ShouldBe(new byte[]
+        {
+            0x55, 0x89, 0xE5,             // push ebp; mov ebp,esp
+            0x83, 0xEC, 0x04,             // sub esp, 4
+            0x6A, 0x00,                   // push 0  (init)
+            0x8F, 0x45, 0xFC,             // pop [ebp-4]  (store)
+            0xFF, 0x75, 0xFC,             // push [ebp-4]  (load)
+            0xFF, 0x15, 0x00, 0x00, 0x00, 0x00,  // call [ExitProcess]
+        });
+    }
 }
