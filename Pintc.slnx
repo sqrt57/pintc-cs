@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Pintc.Tests/Pintc.Tests.csproj" />
+  <Project Path="Pintc/Pintc.csproj" />
+</Solution>
