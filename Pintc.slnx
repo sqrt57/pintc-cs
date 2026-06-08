@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="Pintc.E2eTests/Pintc.E2eTests.csproj" />
+  <Project Path="Pintc.IntegrationTests/Pintc.IntegrationTests.csproj" />
   <Project Path="Pintc.Tests/Pintc.Tests.csproj" />
   <Project Path="Pintc/Pintc.csproj" />
 </Solution>

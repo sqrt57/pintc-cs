@@ -11,10 +11,11 @@ no hidden allocations. Designed for OS kernels, embedded firmware, and low-level
 ## Build & test
 
 ```bash
-dotnet build          # build everything
-dotnet test           # all tests
-dotnet test Pintc.Tests      # unit and integration tests only
-dotnet test Pintc.E2eTests   # end-to-end tests only (compile + run output EXE)
+dotnet build                        # build everything
+dotnet test                         # all tests
+dotnet test Pintc.Tests             # unit tests (pure in-process)
+dotnet test Pintc.IntegrationTests  # integration tests (compiler internals + OS)
+dotnet test Pintc.E2eTests          # e2e tests (pintc as black box, run output EXE)
 ```
 
 ## License

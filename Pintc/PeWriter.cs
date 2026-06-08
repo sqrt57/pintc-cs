@@ -1,0 +1,271 @@
+using System.Text;
+
+namespace Pintc;
+
+// Assembles a minimal PE32 EXE from a CodeUnit.
+// Output: DOS stub + COFF + Optional header + .text + .idata (single-DLL import).
+// Fixed base address 0x00400000; no relocation table.
+static class PeWriter
+{
+    const uint ImageBase = 0x00400000u;
+    const uint SecAlign  = 0x1000u;
+    const uint FileAlign = 0x0200u;
+    const uint HdrSize   = 0x0200u;  // SizeOfHeaders, file-aligned
+    const uint TextRva   = 0x1000u;
+    const uint IdataRva  = 0x2000u;
+
+    // Minimal IMAGE_DOS_HEADER (64 bytes). e_lfanew = 0x40: PE header follows immediately.
+    static readonly byte[] DosHeader = [
+        0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00,  // e_magic, e_cblp, e_cp, e_crlc
+        0x04, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00,  // e_cparhdr, e_minalloc, e_maxalloc, e_ss
+        0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // e_sp, e_csum, e_ip, e_cs
+        0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // e_lfarlc, e_ovno, e_res[0..1]
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // e_res[2..5]
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // e_oemid, e_oeminfo, e_res2[0..2]
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // e_res2[3..6]
+        0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00,  // e_res2[7..9], e_lfanew
+    ];
+
+    public static void Write(CodeUnit unit, Stream output)
+    {
+        var idataBlob = BuildIdata(unit.Imports, out var iatVas, out var idtSize);
+
+        // Patch IAT addresses into a copy of the code.
+        var code = (byte[])unit.Code.Clone();
+        foreach (var rel in unit.IatRefs)
+            BitConverter.TryWriteBytes(code.AsSpan(rel.CodeOffset, 4), iatVas[rel.Import]);
+
+        uint codeVirtSize  = (uint)code.Length;
+        uint idataVirtSize = (uint)idataBlob.Length;
+        uint codeRawSize   = AlignUp(codeVirtSize,  FileAlign);
+        uint idataRawSize  = AlignUp(idataVirtSize, FileAlign);
+        uint textFileOff   = HdrSize;
+        uint idataFileOff  = textFileOff + codeRawSize;
+        uint sizeOfImage   = AlignUp(IdataRva + idataVirtSize, SecAlign);
+
+        using var bw = new BinaryWriter(output, Encoding.Latin1, leaveOpen: true);
+
+        // ── DOS header ───────────────────────────────────────────
+        bw.Write(DosHeader);
+
+        // ── PE signature ─────────────────────────────────────────
+        bw.Write(0x00004550u); // "PE\0\0"
+
+        // ── COFF header (20 bytes) ───────────────────────────────
+        bw.Write((ushort)0x014C); // Machine: I386
+        bw.Write((ushort)2);      // NumberOfSections
+        bw.Write(0u);             // TimeDateStamp
+        bw.Write(0u);             // PointerToSymbolTable
+        bw.Write(0u);             // NumberOfSymbols
+        bw.Write((ushort)0x00E0); // SizeOfOptionalHeader: 224
+        bw.Write((ushort)0x0102); // Characteristics: EXECUTABLE_IMAGE | 32BIT_MACHINE
+
+        // ── Optional header — standard fields (28 bytes) ─────────
+        bw.Write((ushort)0x010B); // Magic: PE32
+        bw.Write((byte)0);        // MajorLinkerVersion
+        bw.Write((byte)0);        // MinorLinkerVersion
+        bw.Write(codeRawSize);    // SizeOfCode
+        bw.Write(idataRawSize);   // SizeOfInitializedData
+        bw.Write(0u);             // SizeOfUninitializedData
+        bw.Write(TextRva);        // AddressOfEntryPoint
+        bw.Write(TextRva);        // BaseOfCode
+        bw.Write(IdataRva);       // BaseOfData (PE32 only)
+
+        // ── Optional header — Windows-specific fields (68 bytes) ─
+        bw.Write(ImageBase);      // ImageBase
+        bw.Write(SecAlign);       // SectionAlignment
+        bw.Write(FileAlign);      // FileAlignment
+        bw.Write((ushort)4);      // MajorOperatingSystemVersion
+        bw.Write((ushort)0);      // MinorOperatingSystemVersion
+        bw.Write((ushort)0);      // MajorImageVersion
+        bw.Write((ushort)0);      // MinorImageVersion
+        bw.Write((ushort)4);      // MajorSubsystemVersion
+        bw.Write((ushort)0);      // MinorSubsystemVersion
+        bw.Write(0u);             // Win32VersionValue
+        bw.Write(sizeOfImage);    // SizeOfImage
+        bw.Write(HdrSize);        // SizeOfHeaders
+        bw.Write(0u);             // CheckSum
+        bw.Write((ushort)2);      // Subsystem: WINDOWS_GUI
+        bw.Write((ushort)0);      // DllCharacteristics
+        bw.Write(0x00100000u);    // SizeOfStackReserve
+        bw.Write(0x00001000u);    // SizeOfStackCommit
+        bw.Write(0x00100000u);    // SizeOfHeapReserve
+        bw.Write(0x00001000u);    // SizeOfHeapCommit
+        bw.Write(0u);             // LoaderFlags
+        bw.Write(16u);            // NumberOfRvaAndSizes
+
+        // ── Data directories (16 × 8 bytes = 128 bytes) ──────────
+        bw.Write(0u); bw.Write(0u);   // [0] Export: empty
+        bw.Write(IdataRva);           // [1] Import: RVA
+        bw.Write(idtSize);            // [1] Import: Size (IDT only, not full .idata)
+        for (int i = 2; i < 16; i++) { bw.Write(0u); bw.Write(0u); }
+
+        // ── Section table ─────────────────────────────────────────
+        // .text
+        bw.Write(Encoding.Latin1.GetBytes(".text\0\0\0")); // Name (8 bytes)
+        bw.Write(codeVirtSize);   // VirtualSize
+        bw.Write(TextRva);        // VirtualAddress
+        bw.Write(codeRawSize);    // SizeOfRawData
+        bw.Write(textFileOff);    // PointerToRawData
+        bw.Write(0u);             // PointerToRelocations
+        bw.Write(0u);             // PointerToLinenumbers
+        bw.Write((ushort)0);      // NumberOfRelocations
+        bw.Write((ushort)0);      // NumberOfLinenumbers
+        bw.Write(0x60000020u);    // Characteristics: CNT_CODE | MEM_EXECUTE | MEM_READ
+
+        // .idata
+        bw.Write(Encoding.Latin1.GetBytes(".idata\0\0")); // Name (8 bytes)
+        bw.Write(idataVirtSize);  // VirtualSize
+        bw.Write(IdataRva);       // VirtualAddress
+        bw.Write(idataRawSize);   // SizeOfRawData
+        bw.Write(idataFileOff);   // PointerToRawData
+        bw.Write(0u);             // PointerToRelocations
+        bw.Write(0u);             // PointerToLinenumbers
+        bw.Write((ushort)0);      // NumberOfRelocations
+        bw.Write((ushort)0);      // NumberOfLinenumbers
+        bw.Write(0xC0000040u);    // Characteristics: CNT_INITIALIZED_DATA | MEM_READ | MEM_WRITE
+
+        // ── Pad headers to HdrSize ────────────────────────────────
+        PadTo(bw, HdrSize);
+
+        // ── .text raw data ────────────────────────────────────────
+        bw.Write(code);
+        PadTo(bw, textFileOff + codeRawSize);
+
+        // ── .idata raw data ───────────────────────────────────────
+        bw.Write(idataBlob);
+        PadTo(bw, idataFileOff + idataRawSize);
+    }
+
+    // Builds the .idata blob and returns:
+    //   iatVas    — absolute VA for each ImportSpec's IAT slot (used to patch code)
+    //   idtSize   — byte count of the IDT (for the Import data directory Size field)
+    static byte[] BuildIdata(
+        IReadOnlyList<ImportSpec> imports,
+        out Dictionary<ImportSpec, uint> iatVas,
+        out uint idtSize)
+    {
+        var byDll = imports
+            .GroupBy(i => i.DllName, StringComparer.OrdinalIgnoreCase)
+            .Select(g => (DllName: g.Key, Funcs: g.ToList()))
+            .ToList();
+        int n = byDll.Count;
+
+        idtSize = (uint)(n + 1) * 20;
+
+        // ── Layout pass: compute every offset within the blob ─────
+        int pos = 0;
+
+        // IDT: (n + 1) descriptors × 20 bytes, including null terminator
+        int idtPos = pos;
+        pos += (n + 1) * 20;
+
+        // ILT: one array per DLL, each (funcCount + 1) × 4 bytes
+        var iltPos = new int[n];
+        for (int d = 0; d < n; d++)
+        {
+            iltPos[d] = pos;
+            pos += (byDll[d].Funcs.Count + 1) * 4;
+        }
+
+        // IAT: same shape as ILT; loader overwrites these with real function addresses
+        var iatPos = new int[n];
+        var funcIatPos = new Dictionary<ImportSpec, int>();
+        for (int d = 0; d < n; d++)
+        {
+            iatPos[d] = pos;
+            foreach (var f in byDll[d].Funcs)
+            {
+                funcIatPos[f] = pos;
+                pos += 4;
+            }
+            pos += 4; // null terminator
+        }
+
+        // Hint/Name table: WORD-aligned hint (0) + null-terminated function name
+        var funcHnPos = new Dictionary<ImportSpec, int>();
+        for (int d = 0; d < n; d++)
+        {
+            foreach (var f in byDll[d].Funcs)
+            {
+                if (pos % 2 != 0) pos++;
+                funcHnPos[f] = pos;
+                pos += 2 + f.EntryPoint.Length + 1; // hint + name + null
+            }
+        }
+
+        // DLL name strings
+        var dllNamePos = new int[n];
+        for (int d = 0; d < n; d++)
+        {
+            dllNamePos[d] = pos;
+            pos += byDll[d].DllName.Length + 1;
+        }
+        if (pos % 2 != 0) pos++;
+
+        // ── Emit pass ─────────────────────────────────────────────
+        var blob = new byte[pos];
+        using var ms = new MemoryStream(blob);
+        using var bw = new BinaryWriter(ms, Encoding.Latin1, leaveOpen: true);
+
+        // IDT
+        for (int d = 0; d < n; d++)
+        {
+            bw.Write((uint)(IdataRva + iltPos[d]));     // OriginalFirstThunk
+            bw.Write(0u);                                // TimeDateStamp
+            bw.Write(0u);                                // ForwarderChain
+            bw.Write((uint)(IdataRva + dllNamePos[d])); // Name
+            bw.Write((uint)(IdataRva + iatPos[d]));     // FirstThunk (IAT RVA)
+        }
+        for (int i = 0; i < 20; i++) bw.Write((byte)0); // null IDT terminator
+
+        // ILTs
+        for (int d = 0; d < n; d++)
+        {
+            foreach (var f in byDll[d].Funcs)
+                bw.Write((uint)(IdataRva + funcHnPos[f]));
+            bw.Write(0u);
+        }
+
+        // IATs (mirror of ILTs; loader patches at load time)
+        for (int d = 0; d < n; d++)
+        {
+            foreach (var f in byDll[d].Funcs)
+                bw.Write((uint)(IdataRva + funcHnPos[f]));
+            bw.Write(0u);
+        }
+
+        // Hint/Name entries
+        for (int d = 0; d < n; d++)
+        {
+            foreach (var f in byDll[d].Funcs)
+            {
+                PadTo(bw, (uint)funcHnPos[f]);
+                bw.Write((ushort)0); // hint (0 = use name)
+                bw.Write(Encoding.Latin1.GetBytes(f.EntryPoint));
+                bw.Write((byte)0);
+            }
+        }
+
+        // DLL name strings
+        for (int d = 0; d < n; d++)
+        {
+            PadTo(bw, (uint)dllNamePos[d]);
+            bw.Write(Encoding.Latin1.GetBytes(byDll[d].DllName));
+            bw.Write((byte)0);
+        }
+
+        iatVas = [];
+        foreach (var (spec, offset) in funcIatPos)
+            iatVas[spec] = ImageBase + IdataRva + (uint)offset;
+
+        return blob;
+    }
+
+    static uint AlignUp(uint value, uint align) => (value + align - 1) / align * align;
+
+    static void PadTo(BinaryWriter bw, uint target)
+    {
+        while (bw.BaseStream.Position < target) bw.Write((byte)0);
+    }
+}
