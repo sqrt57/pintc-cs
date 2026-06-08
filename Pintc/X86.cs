@@ -17,6 +17,10 @@ static class X86
     public static byte[] PushImm32(uint value) =>
         [0x68, (byte)(value & 0xFF), (byte)(value >> 8 & 0xFF), (byte)(value >> 16 & 0xFF), (byte)(value >> 24)];
 
+    // push dword ptr [abs32] — pushes the 32-bit value stored at an absolute memory address
+    public static byte[] PushMem32(uint address) =>
+        [0xFF, 0x35, (byte)(address & 0xFF), (byte)(address >> 8 & 0xFF), (byte)(address >> 16 & 0xFF), (byte)(address >> 24)];
+
     // push ebp — saves caller's frame pointer
     public static byte[] PushEbp() => [0x55];
 

@@ -45,7 +45,8 @@ class Parser(List<Token> tokens)
         if (Eat(TokenKind.LBrace) is null) return null;
 
         var externs = new List<ExternFunDecl>();
-        var funs = new List<FunDecl>();
+        var funs    = new List<FunDecl>();
+        var vars    = new List<ModuleVarDecl>();
 
         while (!Check(TokenKind.RBrace) && !Check(TokenKind.Eof))
         {
@@ -62,15 +63,21 @@ class Parser(List<Token> tokens)
                 if (fun is null) return null;
                 funs.Add(fun);
             }
+            else if (Check(TokenKind.Var))
+            {
+                var v = ParseModuleVarDecl();
+                if (v is null) return null;
+                vars.Add(v);
+            }
             else
             {
-                Error($"expected 'extern' or 'fun', got '{Current.Text}'");
+                Error($"expected 'extern', 'fun', or 'var', got '{Current.Text}'");
                 return null;
             }
         }
 
         if (Eat(TokenKind.RBrace) is null) return null;
-        return new ModuleDecl(name.Text, externs, funs);
+        return new ModuleDecl(name.Text, externs, funs, vars);
     }
 
     // ── Attributes ─────────────────────────────────────────────────────────────
@@ -170,6 +177,24 @@ class Parser(List<Token> tokens)
         return new FunDecl(attrs, name.Text, parms, ret, body);
     }
 
+    ModuleVarDecl? ParseModuleVarDecl()
+    {
+        if (Eat(TokenKind.Var) is null) return null;
+        var name = Eat(TokenKind.Ident);
+        if (name is null) return null;
+        if (Eat(TokenKind.Colon) is null) return null;
+        var type = ParseType();
+        if (type is null) return null;
+        Expr? init = null;
+        if (TryEat(TokenKind.Eq))
+        {
+            init = ParseExpr();
+            if (init is null) return null;
+        }
+        if (Eat(TokenKind.Semicolon) is null) return null;
+        return new ModuleVarDecl(name.Text, type, init);
+    }
+
     // ── Parameters and types ───────────────────────────────────────────────────
 
     List<Param>? ParseParamList()
@@ -253,6 +278,9 @@ class Parser(List<Token> tokens)
             }
             return new IntLiteralExpr(value);
         }
+
+        if (Check(TokenKind.Ident))
+            return new VarRefExpr(Advance().Text);
 
         Error($"expected expression, got '{Current.Text}'");
         return null;

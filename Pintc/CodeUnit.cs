@@ -9,7 +9,8 @@ record IatRef(int CodeOffset, ImportSpec Import);
 // Output of codegen; input to PeWriter.
 class CodeUnit
 {
-    public required byte[]          Code    { get; init; }
-    public required List<IatRef>    IatRefs { get; init; }
+    public required byte[]           Code    { get; init; }
+    public required List<IatRef>     IatRefs { get; init; }
     public required List<ImportSpec> Imports { get; init; }
+    public required byte[]           Data    { get; init; }  // .data section bytes; empty = no .data section
 }

@@ -11,6 +11,7 @@ record Param(string Name, string TypeName);
 
 abstract record Expr;
 record IntLiteralExpr(long Value) : Expr;
+record VarRefExpr(string Name) : Expr;
 
 // A call statement: callee(arg0, arg1, ...)
 record CallStmt(string Callee, List<Expr> Args);
@@ -30,7 +31,11 @@ record FunDecl(
     string ReturnType,
     List<CallStmt> Body);
 
+// A module-scope variable declaration.
+record ModuleVarDecl(string Name, string TypeName, Expr? Init);
+
 record ModuleDecl(
     string Name,
     List<ExternFunDecl> Externs,
-    List<FunDecl> Funs);
+    List<FunDecl> Funs,
+    List<ModuleVarDecl> Vars);

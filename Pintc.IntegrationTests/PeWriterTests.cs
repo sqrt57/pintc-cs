@@ -21,6 +21,17 @@ public class PeWriterTests : IDisposable
         Code    = [0x6A, 0x00, 0xFF, 0x15, 0x00, 0x00, 0x00, 0x00],
         IatRefs = [new IatRef(CodeOffset: 4, ExitProcess)],
         Imports = [ExitProcess],
+        Data    = [],
+    };
+
+    // .data at 0x00402000 holds u32 = 5; code reads it and passes to ExitProcess.
+    static readonly CodeUnit Slice2Unit = new()
+    {
+        Code    = [0xFF, 0x35, 0x00, 0x20, 0x40, 0x00,  // push dword ptr [0x00402000]
+                   0xFF, 0x15, 0x00, 0x00, 0x00, 0x00], // call [IAT_ExitProcess]
+        IatRefs = [new IatRef(CodeOffset: 8, ExitProcess)],
+        Imports = [ExitProcess],
+        Data    = [5, 0, 0, 0],
     };
 
     [Fact]
@@ -40,5 +51,24 @@ public class PeWriterTests : IDisposable
         proc.WaitForExit();
 
         proc.ExitCode.ShouldBe(0);
+    }
+
+    [Fact]
+    public void HardcodedSlice2_ReadsDataSectionAndExitsWith5()
+    {
+        var exePath = Path.Combine(_tempDir, "slice2_pe.exe");
+
+        using (var fs = File.Create(exePath))
+            PeWriter.Write(Slice2Unit, fs);
+
+        using var proc = Process.Start(new ProcessStartInfo(exePath)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError  = true,
+            UseShellExecute        = false,
+        })!;
+        proc.WaitForExit();
+
+        proc.ExitCode.ShouldBe(5);
     }
 }

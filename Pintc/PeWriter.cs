@@ -12,7 +12,9 @@ static class PeWriter
     const uint FileAlign = 0x0200u;
     const uint HdrSize   = 0x0200u;  // SizeOfHeaders, file-aligned
     const uint TextRva   = 0x1000u;
-    const uint IdataRva  = 0x2000u;
+    const uint DataRva   = 0x2000u;  // .data RVA when present; .idata shifts to 0x3000
+    const uint IdataRvaNoData  = 0x2000u;  // .idata when no .data section
+    const uint IdataRvaWithData = 0x3000u; // .idata when .data section present
 
     // Minimal IMAGE_DOS_HEADER (64 bytes). e_lfanew = 0x40: PE header follows immediately.
     static readonly byte[] DosHeader = [
@@ -28,7 +30,10 @@ static class PeWriter
 
     public static void Write(CodeUnit unit, Stream output)
     {
-        var idataBlob = BuildIdata(unit.Imports, out var iatVas, out var idtSize);
+        bool hasData = unit.Data.Length > 0;
+        uint idataRva = hasData ? IdataRvaWithData : IdataRvaNoData;
+
+        var idataBlob = BuildIdata(unit.Imports, idataRva, out var iatVas, out var idtSize);
 
         // Patch IAT addresses into a copy of the code.
         var code = (byte[])unit.Code.Clone();
@@ -36,12 +41,17 @@ static class PeWriter
             BitConverter.TryWriteBytes(code.AsSpan(rel.CodeOffset, 4), iatVas[rel.Import]);
 
         uint codeVirtSize  = (uint)code.Length;
+        uint dataVirtSize  = (uint)unit.Data.Length;
         uint idataVirtSize = (uint)idataBlob.Length;
         uint codeRawSize   = AlignUp(codeVirtSize,  FileAlign);
+        uint dataRawSize   = hasData ? AlignUp(dataVirtSize, FileAlign) : 0u;
         uint idataRawSize  = AlignUp(idataVirtSize, FileAlign);
         uint textFileOff   = HdrSize;
-        uint idataFileOff  = textFileOff + codeRawSize;
-        uint sizeOfImage   = AlignUp(IdataRva + idataVirtSize, SecAlign);
+        uint dataFileOff   = textFileOff + codeRawSize;
+        uint idataFileOff  = hasData ? dataFileOff + dataRawSize : textFileOff + codeRawSize;
+        uint sizeOfImage   = AlignUp(idataRva + idataVirtSize, SecAlign);
+        uint sizeOfInitData = (hasData ? dataRawSize : 0u) + idataRawSize;
+        ushort numSections = hasData ? (ushort)3 : (ushort)2;
 
         using var bw = new BinaryWriter(output, Encoding.Latin1, leaveOpen: true);
 
@@ -53,7 +63,7 @@ static class PeWriter
 
         // ── COFF header (20 bytes) ───────────────────────────────
         bw.Write((ushort)0x014C); // Machine: I386
-        bw.Write((ushort)2);      // NumberOfSections
+        bw.Write(numSections);    // NumberOfSections
         bw.Write(0u);             // TimeDateStamp
         bw.Write(0u);             // PointerToSymbolTable
         bw.Write(0u);             // NumberOfSymbols
@@ -65,11 +75,11 @@ static class PeWriter
         bw.Write((byte)0);        // MajorLinkerVersion
         bw.Write((byte)0);        // MinorLinkerVersion
         bw.Write(codeRawSize);    // SizeOfCode
-        bw.Write(idataRawSize);   // SizeOfInitializedData
+        bw.Write(sizeOfInitData); // SizeOfInitializedData
         bw.Write(0u);             // SizeOfUninitializedData
         bw.Write(TextRva);        // AddressOfEntryPoint
         bw.Write(TextRva);        // BaseOfCode
-        bw.Write(IdataRva);       // BaseOfData (PE32 only)
+        bw.Write(0x2000u);        // BaseOfData (PE32 only) — always 0x2000
 
         // ── Optional header — Windows-specific fields (68 bytes) ─
         bw.Write(ImageBase);      // ImageBase
@@ -96,7 +106,7 @@ static class PeWriter
 
         // ── Data directories (16 × 8 bytes = 128 bytes) ──────────
         bw.Write(0u); bw.Write(0u);   // [0] Export: empty
-        bw.Write(IdataRva);           // [1] Import: RVA
+        bw.Write(idataRva);           // [1] Import: RVA
         bw.Write(idtSize);            // [1] Import: Size (IDT only, not full .idata)
         for (int i = 2; i < 16; i++) { bw.Write(0u); bw.Write(0u); }
 
@@ -113,10 +123,25 @@ static class PeWriter
         bw.Write((ushort)0);      // NumberOfLinenumbers
         bw.Write(0x60000020u);    // Characteristics: CNT_CODE | MEM_EXECUTE | MEM_READ
 
+        // .data (only when vars are present)
+        if (hasData)
+        {
+            bw.Write(Encoding.Latin1.GetBytes(".data\0\0\0")); // Name (8 bytes)
+            bw.Write(dataVirtSize);   // VirtualSize
+            bw.Write(DataRva);        // VirtualAddress
+            bw.Write(dataRawSize);    // SizeOfRawData
+            bw.Write(dataFileOff);    // PointerToRawData
+            bw.Write(0u);             // PointerToRelocations
+            bw.Write(0u);             // PointerToLinenumbers
+            bw.Write((ushort)0);      // NumberOfRelocations
+            bw.Write((ushort)0);      // NumberOfLinenumbers
+            bw.Write(0xC0000040u);    // Characteristics: CNT_INITIALIZED_DATA | MEM_READ | MEM_WRITE
+        }
+
         // .idata
         bw.Write(Encoding.Latin1.GetBytes(".idata\0\0")); // Name (8 bytes)
         bw.Write(idataVirtSize);  // VirtualSize
-        bw.Write(IdataRva);       // VirtualAddress
+        bw.Write(idataRva);       // VirtualAddress
         bw.Write(idataRawSize);   // SizeOfRawData
         bw.Write(idataFileOff);   // PointerToRawData
         bw.Write(0u);             // PointerToRelocations
@@ -132,6 +157,13 @@ static class PeWriter
         bw.Write(code);
         PadTo(bw, textFileOff + codeRawSize);
 
+        // ── .data raw data ────────────────────────────────────────
+        if (hasData)
+        {
+            bw.Write(unit.Data);
+            PadTo(bw, dataFileOff + dataRawSize);
+        }
+
         // ── .idata raw data ───────────────────────────────────────
         bw.Write(idataBlob);
         PadTo(bw, idataFileOff + idataRawSize);
@@ -142,6 +174,7 @@ static class PeWriter
     //   idtSize   — byte count of the IDT (for the Import data directory Size field)
     static byte[] BuildIdata(
         IReadOnlyList<ImportSpec> imports,
+        uint idataRva,
         out Dictionary<ImportSpec, uint> iatVas,
         out uint idtSize)
     {
@@ -211,11 +244,11 @@ static class PeWriter
         // IDT
         for (int d = 0; d < n; d++)
         {
-            bw.Write((uint)(IdataRva + iltPos[d]));     // OriginalFirstThunk
+            bw.Write((uint)(idataRva + iltPos[d]));     // OriginalFirstThunk
             bw.Write(0u);                                // TimeDateStamp
             bw.Write(0u);                                // ForwarderChain
-            bw.Write((uint)(IdataRva + dllNamePos[d])); // Name
-            bw.Write((uint)(IdataRva + iatPos[d]));     // FirstThunk (IAT RVA)
+            bw.Write((uint)(idataRva + dllNamePos[d])); // Name
+            bw.Write((uint)(idataRva + iatPos[d]));     // FirstThunk (IAT RVA)
         }
         for (int i = 0; i < 20; i++) bw.Write((byte)0); // null IDT terminator
 
@@ -223,7 +256,7 @@ static class PeWriter
         for (int d = 0; d < n; d++)
         {
             foreach (var f in byDll[d].Funcs)
-                bw.Write((uint)(IdataRva + funcHnPos[f]));
+                bw.Write((uint)(idataRva + funcHnPos[f]));
             bw.Write(0u);
         }
 
@@ -231,7 +264,7 @@ static class PeWriter
         for (int d = 0; d < n; d++)
         {
             foreach (var f in byDll[d].Funcs)
-                bw.Write((uint)(IdataRva + funcHnPos[f]));
+                bw.Write((uint)(idataRva + funcHnPos[f]));
             bw.Write(0u);
         }
 
@@ -257,7 +290,7 @@ static class PeWriter
 
         iatVas = [];
         foreach (var (spec, offset) in funcIatPos)
-            iatVas[spec] = ImageBase + IdataRva + (uint)offset;
+            iatVas[spec] = ImageBase + idataRva + (uint)offset;
 
         return blob;
     }

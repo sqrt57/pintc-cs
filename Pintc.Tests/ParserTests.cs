@@ -109,6 +109,38 @@ public class ParserTests
         diag.ShouldNotBeEmpty();
     }
 
+    // ── Module var decl ────────────────────────────────────────────────────────
+
+    [Fact]
+    public void ModuleVarDecl_with_initializer()
+    {
+        var m = Parse("module x { var count: u32 = 42; fun f() -> () { } }");
+        m.ShouldNotBeNull();
+        var v = m!.Vars[0];
+        v.Name.ShouldBe("count");
+        v.TypeName.ShouldBe("u32");
+        v.Init.ShouldBeOfType<IntLiteralExpr>().Value.ShouldBe(42L);
+    }
+
+    [Fact]
+    public void ModuleVarDecl_without_initializer()
+    {
+        var m = Parse("module x { var count: u32; fun f() -> () { } }");
+        m.ShouldNotBeNull();
+        var v = m!.Vars[0];
+        v.Name.ShouldBe("count");
+        v.TypeName.ShouldBe("u32");
+        v.Init.ShouldBeNull();
+    }
+
+    [Fact]
+    public void VarRefExpr_in_call_arg()
+    {
+        var m = Parse("module x { fun f() -> () { g(some_var); } }");
+        m.ShouldNotBeNull();
+        m!.Funs[0].Body[0].Args[0].ShouldBeOfType<VarRefExpr>().Name.ShouldBe("some_var");
+    }
+
     // ── Full slice 1 round-trip ────────────────────────────────────────────────
 
     [Fact]
@@ -146,5 +178,22 @@ public class ParserTests
         call.Callee.ShouldBe("exit_process");
         call.Args.ShouldHaveSingleItem();
         call.Args[0].ShouldBeOfType<IntLiteralExpr>().Value.ShouldBe(0L);
+    }
+
+    [Fact]
+    public void Slice2_source_parses_to_expected_ast()
+    {
+        var m = Parse(SliceFixtures.Slice2Source);
+        m.ShouldNotBeNull();
+
+        m!.Vars.ShouldHaveSingleItem();
+        var v = m.Vars[0];
+        v.Name.ShouldBe("exit_code");
+        v.TypeName.ShouldBe("u32");
+        v.Init.ShouldBeOfType<IntLiteralExpr>().Value.ShouldBe(0L);
+
+        var call = m.Funs[0].Body[0];
+        call.Callee.ShouldBe("exit_process");
+        call.Args[0].ShouldBeOfType<VarRefExpr>().Name.ShouldBe("exit_code");
     }
 }
