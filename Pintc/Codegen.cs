@@ -126,6 +126,7 @@ static class Codegen
         }
     }
 
+    // Same-named vars in sibling for loops share the last-allocated slot (harmless today; breaks if loops overlap).
     static void CollectLocals(IEnumerable<Stmt> stmts, Dictionary<string, int> localOffsets, ref int localBytes)
     {
         foreach (var stmt in stmts)
