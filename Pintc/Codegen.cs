@@ -94,6 +94,27 @@ static class Codegen
         _ => throw new NotSupportedException($"No known size for type '{typeName}'")
     };
 
+    // Returns the type string of a variable reference, or null for complex expressions.
+    static string? GetExprType(Expr expr, Dictionary<string, string> localTypes) =>
+        expr is VarRefExpr v && localTypes.TryGetValue(v.Name, out var t) ? t : null;
+
+    // Returns the byte offset of a named field within a record type.
+    static int ResolveRecordFieldByteOffset(
+        string recordTypeName,
+        string fieldName,
+        Dictionary<string, RecordDecl> recordMap)
+    {
+        if (!recordMap.TryGetValue(recordTypeName, out var rec))
+            throw new InvalidOperationException($"'{recordTypeName}' is not a record type");
+        int offset = 0;
+        foreach (var f in rec.Fields)
+        {
+            if (f.Name == fieldName) return offset;
+            offset += StackSlotSize(f.TypeName, recordMap);
+        }
+        throw new InvalidOperationException($"Record '{recordTypeName}' has no field '{fieldName}'");
+    }
+
     // Returns the byte offset (relative to the record base) of the field at the end of path.
     // Each step walks into the named field, accumulating the sizes of preceding fields.
     static int ResolveFieldByteOffset(
@@ -231,6 +252,12 @@ static class Codegen
                 case IndexAssignStmt indexAssign:
                     EmitIndexAssignStmt(indexAssign, varVas, localOffsets, localTypes, recordMap, code);
                     break;
+                case DerefAssignStmt derefAssign:
+                    EmitDerefAssignStmt(derefAssign, varVas, localOffsets, localTypes, recordMap, code);
+                    break;
+                case ArrowAssignStmt arrowAssign:
+                    EmitArrowAssignStmt(arrowAssign, varVas, localOffsets, localTypes, recordMap, code);
+                    break;
                 case CallStmt call:
                     EmitCallStmt(call, importMap, varVas, localOffsets, localTypes, recordMap, code, iatRefs, imports);
                     break;
@@ -335,6 +362,42 @@ static class Codegen
         code.AddRange(X86.PopEcx());                                               // ECX = index
         code.AddRange(X86.PopEax());                                               // EAX = value
         code.AddRange(X86.MovEbpEcx4Disp8Eax((sbyte)localOffsets[stmt.ArrayName]));
+    }
+
+    static void EmitDerefAssignStmt(
+        DerefAssignStmt stmt,
+        Dictionary<string, uint> varVas,
+        Dictionary<string, int> localOffsets,
+        Dictionary<string, string> localTypes,
+        Dictionary<string, RecordDecl> recordMap,
+        List<byte> code)
+    {
+        EmitExpr(stmt.Value, varVas, localOffsets, localTypes, recordMap, code); // push value
+        EmitExpr(stmt.Ptr,   varVas, localOffsets, localTypes, recordMap, code); // push pointer
+        code.AddRange(X86.PopEcx()); // ECX = pointer
+        code.AddRange(X86.PopEax()); // EAX = value
+        code.AddRange(X86.MovMemEcxEax());
+    }
+
+    static void EmitArrowAssignStmt(
+        ArrowAssignStmt stmt,
+        Dictionary<string, uint> varVas,
+        Dictionary<string, int> localOffsets,
+        Dictionary<string, string> localTypes,
+        Dictionary<string, RecordDecl> recordMap,
+        List<byte> code)
+    {
+        var ptrType = GetExprType(stmt.Ptr, localTypes)
+            ?? throw new InvalidOperationException("Cannot determine pointer type for arrow-assign");
+        int fieldOffset = ResolveRecordFieldByteOffset(ptrType[1..], stmt.Field, recordMap);
+        EmitExpr(stmt.Value, varVas, localOffsets, localTypes, recordMap, code); // push value
+        EmitExpr(stmt.Ptr,   varVas, localOffsets, localTypes, recordMap, code); // push pointer
+        code.AddRange(X86.PopEcx()); // ECX = pointer
+        code.AddRange(X86.PopEax()); // EAX = value
+        if (fieldOffset == 0)
+            code.AddRange(X86.MovMemEcxEax());
+        else
+            code.AddRange(X86.MovMemEcxDisp8Eax((sbyte)fieldOffset));
     }
 
     static void EmitWhileStmt(
@@ -520,6 +583,28 @@ static class Codegen
                 code.AddRange(X86.MovEaxEbpEcx4Disp8((sbyte)localOffsets[ix.ArrayName]));
                 code.AddRange(X86.PushEax());
                 break;
+            case AddressOfExpr ao:
+                EmitAddressOfExpr(ao, varVas, localOffsets, localTypes, recordMap, code);
+                break;
+            case DerefExpr deref:
+                EmitExpr(deref.Ptr, varVas, localOffsets, localTypes, recordMap, code);
+                code.AddRange(X86.PopEax());
+                code.AddRange(X86.MovEaxMemEax());
+                code.AddRange(X86.PushEax());
+                break;
+            case ArrowExpr arrow: {
+                var arrowPtrType = GetExprType(arrow.Ptr, localTypes)
+                    ?? throw new InvalidOperationException("Cannot determine pointer type for arrow expression");
+                int arrowFieldOffset = ResolveRecordFieldByteOffset(arrowPtrType[1..], arrow.Field, recordMap);
+                EmitExpr(arrow.Ptr, varVas, localOffsets, localTypes, recordMap, code);
+                code.AddRange(X86.PopEax());
+                if (arrowFieldOffset == 0)
+                    code.AddRange(X86.MovEaxMemEax());
+                else
+                    code.AddRange(X86.MovEaxMemEaxDisp8((sbyte)arrowFieldOffset));
+                code.AddRange(X86.PushEax());
+                break;
+            }
             case UnaryExpr u:
                 EmitExpr(u.Operand, varVas, localOffsets, localTypes, recordMap, code);
                 code.AddRange(X86.PopEax());
@@ -531,15 +616,58 @@ static class Codegen
                 }
                 code.AddRange(X86.PushEax());
                 break;
-            case BinaryExpr b:
+            case BinaryExpr b: {
+                string? leftType = (b.Op is BinaryOp.Add or BinaryOp.Sub)
+                    ? GetExprType(b.Left, localTypes) : null;
                 EmitExpr(b.Left,  varVas, localOffsets, localTypes, recordMap, code);
                 EmitExpr(b.Right, varVas, localOffsets, localTypes, recordMap, code);
                 code.AddRange(X86.PopEcx()); // right
                 code.AddRange(X86.PopEax()); // left
-                EmitBinaryOp(b.Op, code);
+                if (leftType is not null && leftType.StartsWith('^'))
+                {
+                    int stride = StackSlotSize(leftType[1..], recordMap);
+                    if (stride != 1) code.AddRange(X86.ImulEcxImm8((byte)stride));
+                    code.AddRange(b.Op == BinaryOp.Add ? X86.AddEaxEcx() : X86.SubEaxEcx());
+                    code.AddRange(X86.PushEax());
+                }
+                else
+                {
+                    EmitBinaryOp(b.Op, code);
+                }
                 break;
+            }
             default:
                 throw new NotSupportedException($"Unsupported expression type: {expr.GetType().Name}");
+        }
+    }
+
+    static void EmitAddressOfExpr(
+        AddressOfExpr ao,
+        Dictionary<string, uint> varVas,
+        Dictionary<string, int> localOffsets,
+        Dictionary<string, string> localTypes,
+        Dictionary<string, RecordDecl> recordMap,
+        List<byte> code)
+    {
+        switch (ao.Operand)
+        {
+            case VarRefExpr v when localOffsets.TryGetValue(v.Name, out int off):
+                code.AddRange(X86.LeaEaxEbpDisp8((sbyte)off));
+                code.AddRange(X86.PushEax());
+                break;
+            case IndexExpr ix:
+                EmitExpr(ix.Idx, varVas, localOffsets, localTypes, recordMap, code);
+                code.AddRange(X86.PopEcx());
+                code.AddRange(X86.LeaEaxEbpEcx4Disp8((sbyte)localOffsets[ix.ArrayName]));
+                code.AddRange(X86.PushEax());
+                break;
+            case FieldAccessExpr fa:
+                int faOffset = ResolveFieldByteOffset(fa.VarName, fa.Path, localTypes, recordMap);
+                code.AddRange(X86.LeaEaxEbpDisp8((sbyte)(localOffsets[fa.VarName] + faOffset)));
+                code.AddRange(X86.PushEax());
+                break;
+            default:
+                throw new NotSupportedException($"Address-of not supported for {ao.Operand.GetType().Name}");
         }
     }
 

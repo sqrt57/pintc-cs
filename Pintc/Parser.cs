@@ -258,6 +258,14 @@ class Parser(List<Token> tokens)
             return $"[{sizeTok.Text}]{elemType}";
         }
 
+        if (Check(TokenKind.Hat))
+        {
+            Advance();
+            var inner = ParseType();
+            if (inner is null) return null;
+            return $"^{inner}";
+        }
+
         if (IsTypeName(Current.Kind))
             return Advance().Text;
 
@@ -298,6 +306,10 @@ class Parser(List<Token> tokens)
             return ParseAssignStmt();
         if (Check(TokenKind.Ident) && Peek().Kind == TokenKind.LBracket)
             return ParseIndexAssignStmt();
+        if (Check(TokenKind.Ident) && Peek().Kind == TokenKind.Hat)
+            return ParseDerefAssignStmt();
+        if (Check(TokenKind.Ident) && Peek().Kind == TokenKind.Arrow)
+            return ParseArrowAssignStmt();
         return ParseCallStmt();
     }
 
@@ -458,6 +470,32 @@ class Parser(List<Token> tokens)
         if (value is null) return null;
         if (Eat(TokenKind.Semicolon) is null) return null;
         return new IndexAssignStmt(name.Text, idx, value);
+    }
+
+    DerefAssignStmt? ParseDerefAssignStmt()
+    {
+        var name = Eat(TokenKind.Ident);
+        if (name is null) return null;
+        if (Eat(TokenKind.Hat) is null) return null;
+        if (Eat(TokenKind.Eq) is null) return null;
+        var value = ParseExpr();
+        if (value is null) return null;
+        if (Eat(TokenKind.Semicolon) is null) return null;
+        return new DerefAssignStmt(new VarRefExpr(name.Text), value);
+    }
+
+    ArrowAssignStmt? ParseArrowAssignStmt()
+    {
+        var name = Eat(TokenKind.Ident);
+        if (name is null) return null;
+        if (Eat(TokenKind.Arrow) is null) return null;
+        var field = Eat(TokenKind.Ident);
+        if (field is null) return null;
+        if (Eat(TokenKind.Eq) is null) return null;
+        var value = ParseExpr();
+        if (value is null) return null;
+        if (Eat(TokenKind.Semicolon) is null) return null;
+        return new ArrowAssignStmt(new VarRefExpr(name.Text), field.Text, value);
     }
 
     LocalVarDecl? ParseLocalVarDecl()
@@ -676,6 +714,12 @@ class Parser(List<Token> tokens)
             var operand = ParseUnaryExpr();
             return operand is null ? null : new UnaryExpr(UnaryOp.Not, operand);
         }
+        if (Check(TokenKind.At))
+        {
+            Advance();
+            var operand = ParseUnaryExpr();
+            return operand is null ? null : new AddressOfExpr(operand);
+        }
         return ParsePrimaryExpr();
     }
 
@@ -717,7 +761,22 @@ class Parser(List<Token> tokens)
                 }
                 return new FieldAccessExpr(identName, path);
             }
-            return new VarRefExpr(identName);
+            Expr identExpr = new VarRefExpr(identName);
+            while (Check(TokenKind.Hat) || Check(TokenKind.Arrow))
+            {
+                if (TryEat(TokenKind.Hat))
+                {
+                    identExpr = new DerefExpr(identExpr);
+                }
+                else
+                {
+                    Advance(); // consume Arrow
+                    var arrowField = Eat(TokenKind.Ident);
+                    if (arrowField is null) return null;
+                    identExpr = new ArrowExpr(identExpr, arrowField.Text);
+                }
+            }
+            return identExpr;
         }
 
         if (Check(TokenKind.LParen))

@@ -52,6 +52,27 @@ static class X86
     // mov [ebp + ecx*4 + disp8], eax — stores EAX into array element
     public static byte[] MovEbpEcx4Disp8Eax(sbyte disp) => [0x89, 0x44, 0x8D, (byte)disp];
 
+    // lea eax, [ebp + disp8] — address of a local variable slot
+    public static byte[] LeaEaxEbpDisp8(sbyte disp) => [0x8D, 0x45, (byte)disp];
+
+    // lea eax, [ebp + ecx*4 + disp8] — address of an array element
+    public static byte[] LeaEaxEbpEcx4Disp8(sbyte disp) => [0x8D, 0x44, 0x8D, (byte)disp];
+
+    // mov eax, [eax] — dereference: load 32-bit value at address in EAX
+    public static byte[] MovEaxMemEax() => [0x8B, 0x00];
+
+    // mov eax, [eax + disp8] — load from pointer + byte offset (field access through pointer)
+    public static byte[] MovEaxMemEaxDisp8(sbyte disp) => [0x8B, 0x40, (byte)disp];
+
+    // mov [ecx], eax — store EAX at address in ECX (dereference write, zero offset)
+    public static byte[] MovMemEcxEax() => [0x89, 0x01];
+
+    // mov [ecx + disp8], eax — store EAX at pointer + byte offset (arrow-assign)
+    public static byte[] MovMemEcxDisp8Eax(sbyte disp) => [0x89, 0x41, (byte)disp];
+
+    // imul ecx, ecx, imm8 — multiply ECX by an immediate byte (pointer stride scaling)
+    public static byte[] ImulEcxImm8(byte imm) => [0x6B, 0xC9, imm];
+
     // leave — mov esp,ebp; pop ebp (standard frame teardown)
     public static byte[] Leave() => [0xC9];
 
