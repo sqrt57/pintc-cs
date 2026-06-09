@@ -37,6 +37,13 @@ static class X86
     public static byte[] RetN(ushort popBytes) =>
         [0xC2, (byte)(popBytes & 0xFF), (byte)(popBytes >> 8)];
 
+    // call rel32 — direct near call; displacement field starts at byte offset 1.
+    public static byte[] CallRel32() => [0xE8, 0x00, 0x00, 0x00, 0x00];
+    public const int CallRel32DispAt = 1;
+
+    // add esp, imm8 — caller stack cleanup after a cdecl call
+    public static byte[] AddEspImm8(byte bytes) => [0x83, 0xC4, bytes];
+
     // sub esp, imm8 — allocates bytes on the stack for local variables (fits in 7 bits)
     public static byte[] SubEspImm8(byte bytes) => [0x83, 0xEC, bytes];
 

@@ -17,6 +17,7 @@ class Parser(List<Token> tokens)
 
     bool Check(TokenKind kind) => Current.Kind == kind;
     Token Peek() => _pos + 1 < tokens.Count ? tokens[_pos + 1] : tokens[^1];
+    Token PeekAt(int offset) { int idx = _pos + offset; return idx < tokens.Count ? tokens[idx] : tokens[^1]; }
 
     Token? Eat(TokenKind kind)
     {
@@ -38,6 +39,18 @@ class Parser(List<Token> tokens)
 
     // ── Top level ──────────────────────────────────────────────────────────────
 
+    public List<ModuleDecl> ParseProgram()
+    {
+        var modules = new List<ModuleDecl>();
+        while (!Check(TokenKind.Eof))
+        {
+            var module = ParseModule();
+            if (module is null) break;
+            modules.Add(module);
+        }
+        return modules;
+    }
+
     public ModuleDecl? ParseModule()
     {
         if (Eat(TokenKind.Module) is null) return null;
@@ -49,6 +62,8 @@ class Parser(List<Token> tokens)
         var funs    = new List<FunDecl>();
         var vars    = new List<ModuleVarDecl>();
         var records = new List<RecordDecl>();
+        var imports = new List<ImportDecl>();
+        var exports = new List<string>();
 
         while (!Check(TokenKind.RBrace) && !Check(TokenKind.Eof))
         {
@@ -77,15 +92,27 @@ class Parser(List<Token> tokens)
                 if (rec is null) return null;
                 records.Add(rec);
             }
+            else if (Check(TokenKind.Import))
+            {
+                var imp = ParseImportDecl();
+                if (imp is null) return null;
+                imports.Add(imp);
+            }
+            else if (Check(TokenKind.Export))
+            {
+                var exp = ParseExportDecl();
+                if (exp is null) return null;
+                exports.Add(exp);
+            }
             else
             {
-                Error($"expected 'extern', 'fun', 'record', or 'var', got '{Current.Text}'");
+                Error($"expected 'extern', 'fun', 'record', 'var', 'import', or 'export', got '{Current.Text}'");
                 return null;
             }
         }
 
         if (Eat(TokenKind.RBrace) is null) return null;
-        return new ModuleDecl(name.Text, externs, funs, vars, records);
+        return new ModuleDecl(name.Text, externs, funs, vars, records, imports, exports);
     }
 
     // ── Attributes ─────────────────────────────────────────────────────────────
@@ -215,6 +242,33 @@ class Parser(List<Token> tokens)
         return new ModuleVarDecl(name.Text, type, init);
     }
 
+    ImportDecl? ParseImportDecl()
+    {
+        if (Eat(TokenKind.Import) is null) return null;
+        var modName = Eat(TokenKind.Ident);
+        if (modName is null) return null;
+        string alias = modName.Text;
+        // "as Alias" — 'as' is not a keyword, lexed as Ident
+        if (Check(TokenKind.Ident) && Current.Text == "as")
+        {
+            Advance();
+            var aliasTok = Eat(TokenKind.Ident);
+            if (aliasTok is null) return null;
+            alias = aliasTok.Text;
+        }
+        if (Eat(TokenKind.Semicolon) is null) return null;
+        return new ImportDecl(modName.Text, alias);
+    }
+
+    string? ParseExportDecl()
+    {
+        if (Eat(TokenKind.Export) is null) return null;
+        var name = Eat(TokenKind.Ident);
+        if (name is null) return null;
+        if (Eat(TokenKind.Semicolon) is null) return null;
+        return name.Text;
+    }
+
     // ── Parameters and types ───────────────────────────────────────────────────
 
     List<Param>? ParseParamList()
@@ -284,8 +338,35 @@ class Parser(List<Token> tokens)
 
     // ── Statements and expressions ─────────────────────────────────────────────
 
+    ReturnStmt? ParseReturnStmt()
+    {
+        if (Eat(TokenKind.Return) is null) return null;
+        if (TryEat(TokenKind.Semicolon)) return new ReturnStmt(null);
+        var expr = ParseExpr();
+        if (expr is null) return null;
+        if (Eat(TokenKind.Semicolon) is null) return null;
+        return new ReturnStmt(expr);
+    }
+
+    CallExpr? ParseCallArgs(string? qualifier, string name)
+    {
+        if (Eat(TokenKind.LParen) is null) return null;
+        var args = new List<Expr>();
+        while (!Check(TokenKind.RParen) && !Check(TokenKind.Eof))
+        {
+            var arg = ParseExpr();
+            if (arg is null) return null;
+            args.Add(arg);
+            if (!TryEat(TokenKind.Comma)) break;
+        }
+        if (Eat(TokenKind.RParen) is null) return null;
+        return new CallExpr(qualifier, name, args);
+    }
+
     Stmt? ParseStmt()
     {
+        if (Check(TokenKind.Return))
+            return ParseReturnStmt();
         if (Check(TokenKind.Var))
             return ParseLocalVarDecl();
         if (Check(TokenKind.If))
@@ -750,6 +831,19 @@ class Parser(List<Token> tokens)
                 if (Eat(TokenKind.RBracket) is null) return null;
                 return new IndexExpr(identName, idx);
             }
+            // Qualified call expression: ident.ident(...)
+            if (Check(TokenKind.Dot)
+                && PeekAt(1).Kind == TokenKind.Ident
+                && PeekAt(2).Kind == TokenKind.LParen)
+            {
+                Advance(); // consume '.'
+                var funcTok = Eat(TokenKind.Ident);
+                if (funcTok is null) return null;
+                return ParseCallArgs(identName, funcTok.Text);
+            }
+            // Unqualified call expression: ident(...)
+            if (Check(TokenKind.LParen))
+                return ParseCallArgs(null, identName);
             if (Check(TokenKind.Dot))
             {
                 var path = new List<string>();

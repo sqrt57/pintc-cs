@@ -295,6 +295,224 @@ static class PeWriter
         return blob;
     }
 
+    public static void WriteDll(CodeUnit unit, string dllName, Stream output)
+    {
+        bool hasData    = unit.Data.Length > 0;
+        bool hasImports = unit.Imports.Count > 0;
+
+        const uint EdataRva = 0x2000u;
+        uint dataRva        = EdataRva  + SecAlign;                    // 0x3000
+        uint idataRva       = hasData ? dataRva + SecAlign : dataRva;  // 0x3000 or 0x4000
+
+        var edataBlob = BuildEdata(unit.ExportedFuns, dllName, EdataRva);
+
+        byte[]                       idataBlob = [];
+        Dictionary<ImportSpec, uint> iatVas    = [];
+        uint                         idtSize   = 0;
+        if (hasImports)
+            idataBlob = BuildIdata(unit.Imports, idataRva, out iatVas, out idtSize);
+
+        var code = (byte[])unit.Code.Clone();
+        foreach (var rel in unit.IatRefs)
+            BitConverter.TryWriteBytes(code.AsSpan(rel.CodeOffset, 4), iatVas[rel.Import]);
+
+        uint codeVirtSize  = (uint)code.Length;
+        uint edataVirtSize = (uint)edataBlob.Length;
+        uint dataVirtSize  = (uint)unit.Data.Length;
+        uint idataVirtSize = (uint)idataBlob.Length;
+
+        uint codeRawSize   = AlignUp(codeVirtSize,  FileAlign);
+        uint edataRawSize  = AlignUp(edataVirtSize, FileAlign);
+        uint dataRawSize   = hasData    ? AlignUp(dataVirtSize,  FileAlign) : 0u;
+        uint idataRawSize  = hasImports ? AlignUp(idataVirtSize, FileAlign) : 0u;
+
+        uint textFileOff   = HdrSize;
+        uint edataFileOff  = textFileOff + codeRawSize;
+        uint dataFileOff   = edataFileOff + edataRawSize;
+        uint idataFileOff  = hasData ? dataFileOff + dataRawSize : edataFileOff + edataRawSize;
+
+        uint lastRva   = hasImports ? idataRva  : hasData ? dataRva   : EdataRva;
+        uint lastSize  = hasImports ? idataVirtSize : hasData ? dataVirtSize : edataVirtSize;
+        uint sizeOfImage   = AlignUp(lastRva + lastSize, SecAlign);
+        uint sizeOfInitData = edataRawSize + dataRawSize + idataRawSize;
+        ushort numSections = (ushort)(2 + (hasData ? 1 : 0) + (hasImports ? 1 : 0));
+
+        using var bw = new BinaryWriter(output, Encoding.Latin1, leaveOpen: true);
+
+        bw.Write(DosHeader);
+        bw.Write(0x00004550u);
+
+        // COFF header
+        bw.Write((ushort)0x014C);   // Machine: I386
+        bw.Write(numSections);
+        bw.Write(0u);               // TimeDateStamp
+        bw.Write(0u);               // PointerToSymbolTable
+        bw.Write(0u);               // NumberOfSymbols
+        bw.Write((ushort)0x00E0);   // SizeOfOptionalHeader
+        bw.Write((ushort)0x2102);   // EXECUTABLE_IMAGE | 32BIT_MACHINE | DLL
+
+        // Optional header — standard fields
+        bw.Write((ushort)0x010B);   // Magic: PE32
+        bw.Write((byte)0);
+        bw.Write((byte)0);
+        bw.Write(codeRawSize);
+        bw.Write(sizeOfInitData);
+        bw.Write(0u);               // SizeOfUninitializedData
+        bw.Write(0u);               // AddressOfEntryPoint: 0 = no DllMain
+        bw.Write(TextRva);          // BaseOfCode
+        bw.Write(EdataRva);         // BaseOfData
+
+        // Optional header — Windows-specific fields
+        bw.Write(ImageBase);
+        bw.Write(SecAlign);
+        bw.Write(FileAlign);
+        bw.Write((ushort)4);        // MajorOperatingSystemVersion
+        bw.Write((ushort)0);
+        bw.Write((ushort)0);
+        bw.Write((ushort)0);
+        bw.Write((ushort)4);        // MajorSubsystemVersion
+        bw.Write((ushort)0);
+        bw.Write(0u);               // Win32VersionValue
+        bw.Write(sizeOfImage);
+        bw.Write(HdrSize);
+        bw.Write(0u);               // CheckSum
+        bw.Write((ushort)2);        // Subsystem: WINDOWS_GUI
+        bw.Write((ushort)0);        // DllCharacteristics
+        bw.Write(0x00100000u);
+        bw.Write(0x00001000u);
+        bw.Write(0x00100000u);
+        bw.Write(0x00001000u);
+        bw.Write(0u);               // LoaderFlags
+        bw.Write(16u);
+
+        // Data directories
+        bw.Write(EdataRva);         // [0] Export RVA
+        bw.Write(edataVirtSize);    // [0] Export Size
+        if (hasImports) { bw.Write(idataRva); bw.Write(idtSize); }
+        else            { bw.Write(0u);       bw.Write(0u);      }
+        for (int i = 2; i < 16; i++) { bw.Write(0u); bw.Write(0u); }
+
+        // Section table
+        WriteSectionHeader(bw, ".text\0\0\0",  codeVirtSize,  TextRva,   codeRawSize,  textFileOff,  0x60000020u);
+        WriteSectionHeader(bw, ".edata\0\0",   edataVirtSize, EdataRva,  edataRawSize, edataFileOff, 0x40000040u);
+        if (hasData)
+            WriteSectionHeader(bw, ".data\0\0\0",  dataVirtSize,  dataRva,  dataRawSize,  dataFileOff,  0xC0000040u);
+        if (hasImports)
+            WriteSectionHeader(bw, ".idata\0\0",   idataVirtSize, idataRva, idataRawSize, idataFileOff, 0xC0000040u);
+
+        PadTo(bw, HdrSize);
+
+        bw.Write(code);
+        PadTo(bw, textFileOff + codeRawSize);
+
+        bw.Write(edataBlob);
+        PadTo(bw, edataFileOff + edataRawSize);
+
+        if (hasData)
+        {
+            bw.Write(unit.Data);
+            PadTo(bw, dataFileOff + dataRawSize);
+        }
+        if (hasImports)
+        {
+            bw.Write(idataBlob);
+            PadTo(bw, idataFileOff + idataRawSize);
+        }
+    }
+
+    // Builds the .edata (export directory) blob.
+    static byte[] BuildEdata(IReadOnlyList<ExportedFun> exports, string dllName, uint edataRva)
+    {
+        // Sort by name: PE spec requires name pointer table to be sorted for binary search
+        var sorted = exports
+            .Select((f, i) => (f, declIdx: i))
+            .OrderBy(x => x.f.Name, StringComparer.Ordinal)
+            .ToList();
+        int n = exports.Count;
+
+        // Layout within blob:
+        // [0]    IMAGE_EXPORT_DIRECTORY (40 bytes)
+        // [40]   Address table:  n × DWORD  (function RVAs, in declaration order = ordinal order)
+        // [40+n*4]  Name pointer table: n × DWORD  (name string RVAs, in sorted order)
+        // [40+n*8]  Ordinal table:      n × WORD   (0-based indices into address table)
+        // [...]  DLL name string + function name strings
+        int addrTableOff    = 40;
+        int nameTableOff    = addrTableOff    + n * 4;
+        int ordinalTableOff = nameTableOff    + n * 4;
+        int stringAreaOff   = ordinalTableOff + n * 2;
+        if (stringAreaOff % 2 != 0) stringAreaOff++;
+
+        int dllNameOff  = stringAreaOff;
+        int funcNamesOff = dllNameOff + dllName.Length + 1;
+
+        var funcNamePos = new int[n];
+        int pos = funcNamesOff;
+        for (int i = 0; i < n; i++)
+        {
+            funcNamePos[i] = pos;
+            pos += sorted[i].f.Name.Length + 1;
+        }
+
+        var blob = new byte[pos];
+        using var ms = new MemoryStream(blob);
+        using var bw = new BinaryWriter(ms, Encoding.Latin1, leaveOpen: true);
+
+        // IMAGE_EXPORT_DIRECTORY
+        bw.Write(0u);                                           // Characteristics
+        bw.Write(0u);                                           // TimeDateStamp
+        bw.Write((ushort)0);                                    // MajorVersion
+        bw.Write((ushort)0);                                    // MinorVersion
+        bw.Write((uint)(edataRva + dllNameOff));                // Name
+        bw.Write(1u);                                           // Base (ordinal base)
+        bw.Write((uint)n);                                      // NumberOfFunctions
+        bw.Write((uint)n);                                      // NumberOfNames
+        bw.Write((uint)(edataRva + addrTableOff));              // AddressOfFunctions
+        bw.Write((uint)(edataRva + nameTableOff));              // AddressOfNames
+        bw.Write((uint)(edataRva + ordinalTableOff));           // AddressOfNameOrdinals
+
+        // Address table: function RVAs in declaration (ordinal) order
+        foreach (var f in exports)
+            bw.Write(TextRva + (uint)f.CodeOffset);
+
+        // Name pointer table: name RVAs in sorted order
+        for (int i = 0; i < n; i++)
+            bw.Write((uint)(edataRva + funcNamePos[i]));
+
+        // Ordinal table: sorted[i].declIdx = 0-based index into address table
+        for (int i = 0; i < n; i++)
+            bw.Write((ushort)sorted[i].declIdx);
+
+        // DLL name string
+        ms.Position = dllNameOff;
+        bw.Write(Encoding.Latin1.GetBytes(dllName));
+        bw.Write((byte)0);
+
+        // Function name strings (in sorted order)
+        for (int i = 0; i < n; i++)
+        {
+            ms.Position = funcNamePos[i];
+            bw.Write(Encoding.Latin1.GetBytes(sorted[i].f.Name));
+            bw.Write((byte)0);
+        }
+
+        return blob;
+    }
+
+    static void WriteSectionHeader(BinaryWriter bw, string name, uint virtSize, uint rva,
+                                   uint rawSize, uint fileOff, uint characteristics)
+    {
+        bw.Write(Encoding.Latin1.GetBytes(name));
+        bw.Write(virtSize);
+        bw.Write(rva);
+        bw.Write(rawSize);
+        bw.Write(fileOff);
+        bw.Write(0u);           // PointerToRelocations
+        bw.Write(0u);           // PointerToLinenumbers
+        bw.Write((ushort)0);    // NumberOfRelocations
+        bw.Write((ushort)0);    // NumberOfLinenumbers
+        bw.Write(characteristics);
+    }
+
     static uint AlignUp(uint value, uint align) => (value + align - 1) / align * align;
 
     static void PadTo(BinaryWriter bw, uint target)

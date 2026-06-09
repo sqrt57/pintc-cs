@@ -10,22 +10,34 @@ record ResolveResult(
 
 static class Resolver
 {
-    public static ResolveResult Resolve(ModuleDecl module)
+    public static ResolveResult Resolve(ModuleDecl module) => Resolve([module]);
+
+    public static ResolveResult Resolve(List<ModuleDecl> modules)
     {
         var symbols = new Dictionary<string, FunSymbol>();
-        foreach (var ext in module.Externs)
-            symbols[ext.Name] = new ExternFunSymbol(ext);
-        foreach (var fun in module.Funs)
-            symbols[fun.Name] = new LocalFunSymbol(fun);
+        foreach (var module in modules)
+        {
+            foreach (var ext in module.Externs)
+                symbols[ext.Name] = new ExternFunSymbol(ext);
+            foreach (var fun in module.Funs)
+                symbols[fun.Name] = new LocalFunSymbol(fun);
+        }
 
         var diagnostics = new List<Diagnostic>();
-        foreach (var fun in module.Funs)
-            foreach (var stmt in fun.Body)
-                if (stmt is CallStmt call && !symbols.ContainsKey(call.Callee))
-                    diagnostics.Add(new Diagnostic(
-                        Severity.Error,
-                        SourceSpan.None,
-                        $"Unknown identifier '{call.Callee}'"));
+        foreach (var module in modules)
+        {
+            foreach (var fun in module.Funs)
+            {
+                foreach (var stmt in fun.Body)
+                {
+                    if (stmt is CallStmt call && !symbols.ContainsKey(call.Callee))
+                        diagnostics.Add(new Diagnostic(
+                            Severity.Error,
+                            SourceSpan.None,
+                            $"Unknown identifier '{call.Callee}'"));
+                }
+            }
+        }
 
         return new ResolveResult(symbols, diagnostics);
     }

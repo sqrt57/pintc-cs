@@ -18,20 +18,22 @@ public class PeWriterTests : IDisposable
     // bytes 4-7 are the IAT address placeholder, patched by PeWriter
     static readonly CodeUnit Slice1Unit = new()
     {
-        Code    = [0x6A, 0x00, 0xFF, 0x15, 0x00, 0x00, 0x00, 0x00],
-        IatRefs = [new IatRef(CodeOffset: 4, ExitProcess)],
-        Imports = [ExitProcess],
-        Data    = [],
+        Code         = [0x6A, 0x00, 0xFF, 0x15, 0x00, 0x00, 0x00, 0x00],
+        IatRefs      = [new IatRef(CodeOffset: 4, ExitProcess)],
+        Imports      = [ExitProcess],
+        Data         = [],
+        ExportedFuns = [],
     };
 
     // .data at 0x00402000 holds u32 = 5; code reads it and passes to ExitProcess.
     static readonly CodeUnit Slice2Unit = new()
     {
-        Code    = [0xFF, 0x35, 0x00, 0x20, 0x40, 0x00,  // push dword ptr [0x00402000]
-                   0xFF, 0x15, 0x00, 0x00, 0x00, 0x00], // call [IAT_ExitProcess]
-        IatRefs = [new IatRef(CodeOffset: 8, ExitProcess)],
-        Imports = [ExitProcess],
-        Data    = [5, 0, 0, 0],
+        Code         = [0xFF, 0x35, 0x00, 0x20, 0x40, 0x00,  // push dword ptr [0x00402000]
+                        0xFF, 0x15, 0x00, 0x00, 0x00, 0x00], // call [IAT_ExitProcess]
+        IatRefs      = [new IatRef(CodeOffset: 8, ExitProcess)],
+        Imports      = [ExitProcess],
+        Data         = [5, 0, 0, 0],
+        ExportedFuns = [],
     };
 
     [Fact]

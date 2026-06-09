@@ -1,33 +1,121 @@
 namespace Pintc;
 
+record LocalCallRef(int PatchOffset, string ModuleName, string FuncName);
+
+// Per-function emit context: bundles all state shared across emit helpers.
+record FunCtx(
+    Dictionary<string, ImportSpec>      ImportMap,
+    Dictionary<string, uint>            VarVas,
+    Dictionary<string, int>             Offsets,       // locals (neg EBP) + params (pos EBP)
+    Dictionary<string, string>          Types,
+    Dictionary<string, RecordDecl>      RecordMap,
+    List<byte>                          Code,
+    List<IatRef>                        IatRefs,
+    List<ImportSpec>                    Imports,
+    string                              ModuleName,
+    IReadOnlyDictionary<string, string> AliasMap,
+    List<LocalCallRef>                  LocalCallRefs,
+    int                                 LocalBytes,
+    bool                                NeedsFrame,
+    bool                                IsStdcall,     // true for [dll_export] functions (callee cleans up)
+    int                                 ParamStackBytes);
+
 static class Codegen
 {
-    // .data lives at RVA 0x2000 (when present); codegen bakes VAs into code directly.
     const uint ImageBase = 0x00400000u;
     const uint DataRva   = 0x00002000u;
 
-    public static CodeUnit Emit(ModuleDecl module)
+    // Single-module overload: kept for backwards compat (CodegenTests, IntegrationTests).
+    public static CodeUnit Emit(ModuleDecl module) => Emit([module]);
+
+    public static CodeUnit Emit(List<ModuleDecl> modules, bool isDll = false)
     {
-        var importMap = BuildImportMap(module.Externs);
-        var (varVas, dataBytes) = BuildDataSection(module.Vars);
-        var recordMap = BuildRecordMap(module.Records);
+        var allExterns = modules.SelectMany(m => m.Externs).ToList();
+        var allVars    = modules.SelectMany(m => m.Vars).ToList();
+        var allRecords = modules.SelectMany(m => m.Records).ToList();
 
-        // Entry point is the first function emitted; must be at the start of .text.
-        var entryFun = module.Funs.FirstOrDefault(f => f.Attributes.Any(a => a.Name == "win32_entry"))
-            ?? throw new InvalidOperationException("No [win32_entry] function found");
+        var importMap = BuildImportMap(allExterns);
+        var (varVas, dataBytes) = BuildDataSection(allVars);
+        var recordMap = BuildRecordMap(allRecords);
 
-        var code    = new List<byte>();
-        var iatRefs = new List<IatRef>();
-        var imports = new List<ImportSpec>();
+        var code          = new List<byte>();
+        var iatRefs       = new List<IatRef>();
+        var imports       = new List<ImportSpec>();
+        var localCallRefs = new List<LocalCallRef>();
+        var funOffsets    = new Dictionary<(string, string), int>();
 
-        EmitFun(entryFun, importMap, varVas, recordMap, code, iatRefs, imports);
+        // Per-module alias map: alias → module name
+        var moduleAliases = modules.ToDictionary(
+            m => m.Name,
+            m => (IReadOnlyDictionary<string, string>)
+                  m.Imports.ToDictionary(i => i.Alias, i => i.ModuleName));
+
+        if (isDll)
+        {
+            // DLL mode: no [win32_entry] required; emit all functions in declaration order
+            foreach (var mod in modules)
+                foreach (var fun in mod.Funs)
+                {
+                    funOffsets[(mod.Name, fun.Name)] = code.Count;
+                    EmitFun(fun, mod.Name, moduleAliases[mod.Name],
+                            importMap, varVas, recordMap, code, iatRefs, imports, localCallRefs);
+                }
+        }
+        else
+        {
+            // EXE mode: entry function must be at code offset 0 (PE AddressOfEntryPoint = TextRva)
+            ModuleDecl? entryModule = null;
+            FunDecl?    entryFun    = null;
+            foreach (var mod in modules)
+            {
+                var f = mod.Funs.FirstOrDefault(f => f.Attributes.Any(a => a.Name == "win32_entry"));
+                if (f is not null) { entryModule = mod; entryFun = f; break; }
+            }
+            if (entryFun is null || entryModule is null)
+                throw new InvalidOperationException("No [win32_entry] function found");
+
+            funOffsets[(entryModule.Name, entryFun.Name)] = code.Count;
+            EmitFun(entryFun, entryModule.Name, moduleAliases[entryModule.Name],
+                    importMap, varVas, recordMap, code, iatRefs, imports, localCallRefs);
+
+            foreach (var mod in modules)
+                foreach (var fun in mod.Funs)
+                {
+                    if (fun == entryFun) continue;
+                    funOffsets[(mod.Name, fun.Name)] = code.Count;
+                    EmitFun(fun, mod.Name, moduleAliases[mod.Name],
+                            importMap, varVas, recordMap, code, iatRefs, imports, localCallRefs);
+                }
+        }
+
+        // Backpatch internal call displacements
+        foreach (var lcr in localCallRefs)
+        {
+            int targetOffset = funOffsets[(lcr.ModuleName, lcr.FuncName)];
+            int rel32 = targetOffset - (lcr.PatchOffset + 4);
+            code[lcr.PatchOffset]     = (byte) rel32;
+            code[lcr.PatchOffset + 1] = (byte)(rel32 >> 8);
+            code[lcr.PatchOffset + 2] = (byte)(rel32 >> 16);
+            code[lcr.PatchOffset + 3] = (byte)(rel32 >> 24);
+        }
+
+        // Collect DLL exports (only in DLL mode)
+        var exportedFuns = new List<ExportedFun>();
+        if (isDll)
+        {
+            foreach (var mod in modules)
+                foreach (var fun in mod.Funs)
+                    if (fun.Attributes.Any(a => a.Name == "dll_export"))
+                        exportedFuns.Add(new ExportedFun(fun.Name, funOffsets[(mod.Name, fun.Name)]));
+        }
 
         return new CodeUnit
         {
-            Code    = [.. code],
-            IatRefs = iatRefs,
-            Imports = imports,
-            Data    = [.. dataBytes],
+            Code         = [.. code],
+            IatRefs      = iatRefs,
+            Imports      = imports,
+            Data         = [.. dataBytes],
+            ExportedFuns = exportedFuns,
         };
     }
 
@@ -49,7 +137,6 @@ static class Codegen
     {
         var varVas = new Dictionary<string, uint>();
         var data   = new List<byte>();
-
         foreach (var v in vars)
         {
             varVas[v.Name] = ImageBase + DataRva + (uint)data.Count;
@@ -58,7 +145,6 @@ static class Codegen
             for (int i = 0; i < size; i++)
                 data.Add((byte)(initVal >> (8 * i)));
         }
-
         return (varVas, data);
     }
 
@@ -94,11 +180,9 @@ static class Codegen
         _ => throw new NotSupportedException($"No known size for type '{typeName}'")
     };
 
-    // Returns the type string of a variable reference, or null for complex expressions.
-    static string? GetExprType(Expr expr, Dictionary<string, string> localTypes) =>
-        expr is VarRefExpr v && localTypes.TryGetValue(v.Name, out var t) ? t : null;
+    static string? GetExprType(Expr expr, Dictionary<string, string> types) =>
+        expr is VarRefExpr v && types.TryGetValue(v.Name, out var t) ? t : null;
 
-    // Returns the byte offset of a named field within a record type.
     static int ResolveRecordFieldByteOffset(
         string recordTypeName,
         string fieldName,
@@ -115,15 +199,13 @@ static class Codegen
         throw new InvalidOperationException($"Record '{recordTypeName}' has no field '{fieldName}'");
     }
 
-    // Returns the byte offset (relative to the record base) of the field at the end of path.
-    // Each step walks into the named field, accumulating the sizes of preceding fields.
     static int ResolveFieldByteOffset(
         string varName, List<string> path,
-        Dictionary<string, string> localTypes,
+        Dictionary<string, string> types,
         Dictionary<string, RecordDecl> recordMap)
     {
         int offset = 0;
-        string currentType = localTypes[varName];
+        string currentType = types[varName];
         foreach (var fieldName in path)
         {
             if (!recordMap.TryGetValue(currentType, out var rec))
@@ -141,27 +223,72 @@ static class Codegen
         return offset;
     }
 
+    // Same-named vars in sibling for loops share the last-allocated slot (harmless today; breaks if loops overlap).
+    static void CollectLocals(
+        IEnumerable<Stmt> stmts,
+        Dictionary<string, int> offsets,
+        Dictionary<string, string> types,
+        Dictionary<string, RecordDecl> recordMap,
+        ref int localBytes)
+    {
+        foreach (var stmt in stmts)
+        {
+            if (stmt is LocalVarDecl lv)
+            {
+                localBytes       += StackSlotSize(lv.TypeName, recordMap);
+                offsets[lv.Name]  = -localBytes;
+                types[lv.Name]    = lv.TypeName;
+            }
+            else if (stmt is IfStmt ifStmt)
+            {
+                CollectLocals(ifStmt.Then, offsets, types, recordMap, ref localBytes);
+                if (ifStmt.Else is not null)
+                    CollectLocals(ifStmt.Else, offsets, types, recordMap, ref localBytes);
+            }
+            else if (stmt is WhileStmt whileStmt)
+                CollectLocals(whileStmt.Body, offsets, types, recordMap, ref localBytes);
+            else if (stmt is LoopStmt loopStmt)
+                CollectLocals(loopStmt.Body, offsets, types, recordMap, ref localBytes);
+            else if (stmt is ForStmt forStmt)
+            {
+                localBytes                   += StackSlotSize(forStmt.VarTypeName, recordMap);
+                offsets[forStmt.VarName]      = -localBytes;
+                types[forStmt.VarName]        = forStmt.VarTypeName;
+                CollectLocals(forStmt.Body, offsets, types, recordMap, ref localBytes);
+            }
+        }
+    }
+
     static void EmitFun(
         FunDecl fun,
+        string moduleName,
+        IReadOnlyDictionary<string, string> aliasMap,
         Dictionary<string, ImportSpec> importMap,
         Dictionary<string, uint> varVas,
         Dictionary<string, RecordDecl> recordMap,
         List<byte> code,
         List<IatRef> iatRefs,
-        List<ImportSpec> imports)
+        List<ImportSpec> imports,
+        List<LocalCallRef> localCallRefs)
     {
-        bool isEntryPoint = fun.Attributes.Any(a => a.Name == "win32_entry");
-        bool isNoReturn   = fun.Attributes.Any(a => a.Name == "noreturn");
+        bool isEntryPoint    = fun.Attributes.Any(a => a.Name == "win32_entry");
+        bool isNoReturn      = fun.Attributes.Any(a => a.Name == "noreturn");
+        bool isDllExport     = fun.Attributes.Any(a => a.Name == "dll_export");
+        bool isStdcall       = isDllExport;
+        int  paramStackBytes = isStdcall ? fun.Params.Count * 4 : 0;
 
-        // Allocate stack slots for all local variables in the function (including nested blocks).
-        var localOffsets = new Dictionary<string, int>();
-        var localTypes   = new Dictionary<string, string>();
-        int localBytes   = 0;
-        CollectLocals(fun.Body, localOffsets, localTypes, recordMap, ref localBytes);
+        var offsets    = new Dictionary<string, int>();
+        var types      = new Dictionary<string, string>();
+        int localBytes = 0;
+        CollectLocals(fun.Body, offsets, types, recordMap, ref localBytes);
 
-        // Emit a frame when the function has locals or is a regular (non-entry) function.
-        // The Win32 entry point is called directly by the OS with no caller frame, but we
-        // still need EBP set up when locals are present for [ebp+disp8] addressing.
+        // Parameters: positive EBP offsets ([ebp+8] = first param after saved EBP + ret addr)
+        for (int i = 0; i < fun.Params.Count; i++)
+        {
+            offsets[fun.Params[i].Name] = 8 + i * 4;
+            types[fun.Params[i].Name]   = fun.Params[i].TypeName;
+        }
+
         bool needsFrame = !isEntryPoint || localBytes > 0;
         if (needsFrame)
         {
@@ -171,68 +298,29 @@ static class Codegen
                 code.AddRange(X86.SubEspImm8((byte)localBytes));
         }
 
-        EmitStmts(fun.Body, importMap, varVas, localOffsets, localTypes, recordMap, code, iatRefs, imports);
+        var ctx = new FunCtx(importMap, varVas, offsets, types, recordMap,
+                             code, iatRefs, imports,
+                             moduleName, aliasMap, localCallRefs,
+                             localBytes, needsFrame, isStdcall, paramStackBytes);
+
+        EmitStmts(fun.Body, ctx);
 
         if (!isNoReturn)
         {
             if (needsFrame)
             {
-                // leave = mov esp,ebp; pop ebp — restores stack and frame pointer.
-                if (localBytes > 0)
-                    code.AddRange(X86.Leave());
-                else
-                    code.AddRange(X86.PopEbp());
+                if (localBytes > 0) code.AddRange(X86.Leave());
+                else code.AddRange(X86.PopEbp());
             }
-            code.AddRange(X86.Ret());
-        }
-    }
-
-    // Same-named vars in sibling for loops share the last-allocated slot (harmless today; breaks if loops overlap).
-    static void CollectLocals(
-        IEnumerable<Stmt> stmts,
-        Dictionary<string, int> localOffsets,
-        Dictionary<string, string> localTypes,
-        Dictionary<string, RecordDecl> recordMap,
-        ref int localBytes)
-    {
-        foreach (var stmt in stmts)
-        {
-            if (stmt is LocalVarDecl lv)
-            {
-                localBytes            += StackSlotSize(lv.TypeName, recordMap);
-                localOffsets[lv.Name]  = -localBytes;
-                localTypes[lv.Name]    = lv.TypeName;
-            }
-            else if (stmt is IfStmt ifStmt)
-            {
-                CollectLocals(ifStmt.Then, localOffsets, localTypes, recordMap, ref localBytes);
-                if (ifStmt.Else is not null)
-                    CollectLocals(ifStmt.Else, localOffsets, localTypes, recordMap, ref localBytes);
-            }
-            else if (stmt is WhileStmt whileStmt)
-                CollectLocals(whileStmt.Body, localOffsets, localTypes, recordMap, ref localBytes);
-            else if (stmt is LoopStmt loopStmt)
-                CollectLocals(loopStmt.Body, localOffsets, localTypes, recordMap, ref localBytes);
-            else if (stmt is ForStmt forStmt)
-            {
-                localBytes                   += StackSlotSize(forStmt.VarTypeName, recordMap);
-                localOffsets[forStmt.VarName] = -localBytes;
-                localTypes[forStmt.VarName]   = forStmt.VarTypeName;
-                CollectLocals(forStmt.Body, localOffsets, localTypes, recordMap, ref localBytes);
-            }
+            code.AddRange(isStdcall && paramStackBytes > 0
+                ? X86.RetN((ushort)paramStackBytes)
+                : X86.Ret());
         }
     }
 
     static void EmitStmts(
         IEnumerable<Stmt> stmts,
-        Dictionary<string, ImportSpec> importMap,
-        Dictionary<string, uint> varVas,
-        Dictionary<string, int> localOffsets,
-        Dictionary<string, string> localTypes,
-        Dictionary<string, RecordDecl> recordMap,
-        List<byte> code,
-        List<IatRef> iatRefs,
-        List<ImportSpec> imports,
+        FunCtx ctx,
         List<int>? breakPatches = null,
         List<int>? continuePatches = null)
     {
@@ -241,45 +329,48 @@ static class Codegen
             switch (stmt)
             {
                 case LocalVarDecl lv:
-                    EmitLocalVarDecl(lv, varVas, localOffsets, localTypes, recordMap, code);
+                    EmitLocalVarDecl(lv, ctx);
                     break;
                 case AssignStmt assign:
-                    EmitAssignStmt(assign, varVas, localOffsets, localTypes, recordMap, code);
+                    EmitAssignStmt(assign, ctx);
                     break;
                 case FieldAssignStmt fieldAssign:
-                    EmitFieldAssignStmt(fieldAssign, varVas, localOffsets, localTypes, recordMap, code);
+                    EmitFieldAssignStmt(fieldAssign, ctx);
                     break;
                 case IndexAssignStmt indexAssign:
-                    EmitIndexAssignStmt(indexAssign, varVas, localOffsets, localTypes, recordMap, code);
+                    EmitIndexAssignStmt(indexAssign, ctx);
                     break;
                 case DerefAssignStmt derefAssign:
-                    EmitDerefAssignStmt(derefAssign, varVas, localOffsets, localTypes, recordMap, code);
+                    EmitDerefAssignStmt(derefAssign, ctx);
                     break;
                 case ArrowAssignStmt arrowAssign:
-                    EmitArrowAssignStmt(arrowAssign, varVas, localOffsets, localTypes, recordMap, code);
+                    EmitArrowAssignStmt(arrowAssign, ctx);
                     break;
                 case CallStmt call:
-                    EmitCallStmt(call, importMap, varVas, localOffsets, localTypes, recordMap, code, iatRefs, imports);
+                    EmitCallStmt(call, ctx);
+                    break;
+                case ReturnStmt ret:
+                    EmitReturnStmt(ret, ctx);
                     break;
                 case IfStmt ifStmt:
-                    EmitIfStmt(ifStmt, importMap, varVas, localOffsets, localTypes, recordMap, code, iatRefs, imports, breakPatches, continuePatches);
+                    EmitIfStmt(ifStmt, ctx, breakPatches, continuePatches);
                     break;
                 case ForStmt forStmt:
-                    EmitForStmt(forStmt, importMap, varVas, localOffsets, localTypes, recordMap, code, iatRefs, imports);
+                    EmitForStmt(forStmt, ctx);
                     break;
                 case WhileStmt whileStmt:
-                    EmitWhileStmt(whileStmt, importMap, varVas, localOffsets, localTypes, recordMap, code, iatRefs, imports);
+                    EmitWhileStmt(whileStmt, ctx);
                     break;
                 case LoopStmt loopStmt:
-                    EmitLoopStmt(loopStmt, importMap, varVas, localOffsets, localTypes, recordMap, code, iatRefs, imports);
+                    EmitLoopStmt(loopStmt, ctx);
                     break;
                 case BreakStmt:
-                    code.AddRange(X86.JmpRel32());
-                    breakPatches!.Add(code.Count - 4);
+                    ctx.Code.AddRange(X86.JmpRel32());
+                    breakPatches!.Add(ctx.Code.Count - 4);
                     break;
                 case ContinueStmt:
-                    code.AddRange(X86.JmpRel32());
-                    continuePatches!.Add(code.Count - 4);
+                    ctx.Code.AddRange(X86.JmpRel32());
+                    continuePatches!.Add(ctx.Code.Count - 4);
                     break;
             }
         }
@@ -287,352 +378,322 @@ static class Codegen
 
     static void EmitIfStmt(
         IfStmt ifStmt,
-        Dictionary<string, ImportSpec> importMap,
-        Dictionary<string, uint> varVas,
-        Dictionary<string, int> localOffsets,
-        Dictionary<string, string> localTypes,
-        Dictionary<string, RecordDecl> recordMap,
-        List<byte> code,
-        List<IatRef> iatRefs,
-        List<ImportSpec> imports,
+        FunCtx ctx,
         List<int>? breakPatches = null,
         List<int>? continuePatches = null)
     {
-        EmitExpr(ifStmt.Condition, varVas, localOffsets, localTypes, recordMap, code);
-        code.AddRange(X86.PopEax());
-        code.AddRange(X86.TestEaxEax());
+        EmitExpr(ifStmt.Condition, ctx);
+        ctx.Code.AddRange(X86.PopEax());
+        ctx.Code.AddRange(X86.TestEaxEax());
 
-        code.AddRange(X86.JzRel32());
-        int jzPatch = code.Count - 4;
+        ctx.Code.AddRange(X86.JzRel32());
+        int jzPatch = ctx.Code.Count - 4;
 
-        EmitStmts(ifStmt.Then, importMap, varVas, localOffsets, localTypes, recordMap, code, iatRefs, imports, breakPatches, continuePatches);
+        EmitStmts(ifStmt.Then, ctx, breakPatches, continuePatches);
 
         if (ifStmt.Else is null)
         {
-            X86.Backpatch(code, jzPatch, code.Count);
+            X86.Backpatch(ctx.Code, jzPatch, ctx.Code.Count);
         }
         else
         {
-            code.AddRange(X86.JmpRel32());
-            int jmpPatch = code.Count - 4;
+            ctx.Code.AddRange(X86.JmpRel32());
+            int jmpPatch = ctx.Code.Count - 4;
 
-            X86.Backpatch(code, jzPatch, code.Count);
+            X86.Backpatch(ctx.Code, jzPatch, ctx.Code.Count);
 
-            EmitStmts(ifStmt.Else, importMap, varVas, localOffsets, localTypes, recordMap, code, iatRefs, imports, breakPatches, continuePatches);
+            EmitStmts(ifStmt.Else, ctx, breakPatches, continuePatches);
 
-            X86.Backpatch(code, jmpPatch, code.Count);
+            X86.Backpatch(ctx.Code, jmpPatch, ctx.Code.Count);
         }
     }
 
-    static void EmitAssignStmt(
-        AssignStmt stmt,
-        Dictionary<string, uint> varVas,
-        Dictionary<string, int> localOffsets,
-        Dictionary<string, string> localTypes,
-        Dictionary<string, RecordDecl> recordMap,
-        List<byte> code)
+    static void EmitAssignStmt(AssignStmt stmt, FunCtx ctx)
     {
-        EmitExpr(stmt.Value, varVas, localOffsets, localTypes, recordMap, code);
-        code.AddRange(X86.PopToEbpDisp8((sbyte)localOffsets[stmt.Name]));
+        EmitExpr(stmt.Value, ctx);
+        ctx.Code.AddRange(X86.PopToEbpDisp8((sbyte)ctx.Offsets[stmt.Name]));
     }
 
-    static void EmitFieldAssignStmt(
-        FieldAssignStmt stmt,
-        Dictionary<string, uint> varVas,
-        Dictionary<string, int> localOffsets,
-        Dictionary<string, string> localTypes,
-        Dictionary<string, RecordDecl> recordMap,
-        List<byte> code)
+    static void EmitFieldAssignStmt(FieldAssignStmt stmt, FunCtx ctx)
     {
-        EmitExpr(stmt.Value, varVas, localOffsets, localTypes, recordMap, code);
-        int fieldOffset = ResolveFieldByteOffset(stmt.VarName, stmt.Path, localTypes, recordMap);
-        code.AddRange(X86.PopToEbpDisp8((sbyte)(localOffsets[stmt.VarName] + fieldOffset)));
+        EmitExpr(stmt.Value, ctx);
+        int fieldOffset = ResolveFieldByteOffset(stmt.VarName, stmt.Path, ctx.Types, ctx.RecordMap);
+        ctx.Code.AddRange(X86.PopToEbpDisp8((sbyte)(ctx.Offsets[stmt.VarName] + fieldOffset)));
     }
 
-    static void EmitIndexAssignStmt(
-        IndexAssignStmt stmt,
-        Dictionary<string, uint> varVas,
-        Dictionary<string, int> localOffsets,
-        Dictionary<string, string> localTypes,
-        Dictionary<string, RecordDecl> recordMap,
-        List<byte> code)
+    static void EmitIndexAssignStmt(IndexAssignStmt stmt, FunCtx ctx)
     {
-        EmitExpr(stmt.Value, varVas, localOffsets, localTypes, recordMap, code); // push value
-        EmitExpr(stmt.Idx,   varVas, localOffsets, localTypes, recordMap, code); // push index
-        code.AddRange(X86.PopEcx());                                               // ECX = index
-        code.AddRange(X86.PopEax());                                               // EAX = value
-        code.AddRange(X86.MovEbpEcx4Disp8Eax((sbyte)localOffsets[stmt.ArrayName]));
+        EmitExpr(stmt.Value, ctx);
+        EmitExpr(stmt.Idx, ctx);
+        ctx.Code.AddRange(X86.PopEcx());
+        ctx.Code.AddRange(X86.PopEax());
+        ctx.Code.AddRange(X86.MovEbpEcx4Disp8Eax((sbyte)ctx.Offsets[stmt.ArrayName]));
     }
 
-    static void EmitDerefAssignStmt(
-        DerefAssignStmt stmt,
-        Dictionary<string, uint> varVas,
-        Dictionary<string, int> localOffsets,
-        Dictionary<string, string> localTypes,
-        Dictionary<string, RecordDecl> recordMap,
-        List<byte> code)
+    static void EmitDerefAssignStmt(DerefAssignStmt stmt, FunCtx ctx)
     {
-        EmitExpr(stmt.Value, varVas, localOffsets, localTypes, recordMap, code); // push value
-        EmitExpr(stmt.Ptr,   varVas, localOffsets, localTypes, recordMap, code); // push pointer
-        code.AddRange(X86.PopEcx()); // ECX = pointer
-        code.AddRange(X86.PopEax()); // EAX = value
-        code.AddRange(X86.MovMemEcxEax());
+        EmitExpr(stmt.Value, ctx);
+        EmitExpr(stmt.Ptr, ctx);
+        ctx.Code.AddRange(X86.PopEcx());
+        ctx.Code.AddRange(X86.PopEax());
+        ctx.Code.AddRange(X86.MovMemEcxEax());
     }
 
-    static void EmitArrowAssignStmt(
-        ArrowAssignStmt stmt,
-        Dictionary<string, uint> varVas,
-        Dictionary<string, int> localOffsets,
-        Dictionary<string, string> localTypes,
-        Dictionary<string, RecordDecl> recordMap,
-        List<byte> code)
+    static void EmitArrowAssignStmt(ArrowAssignStmt stmt, FunCtx ctx)
     {
-        var ptrType = GetExprType(stmt.Ptr, localTypes)
+        var ptrType = GetExprType(stmt.Ptr, ctx.Types)
             ?? throw new InvalidOperationException("Cannot determine pointer type for arrow-assign");
-        int fieldOffset = ResolveRecordFieldByteOffset(ptrType[1..], stmt.Field, recordMap);
-        EmitExpr(stmt.Value, varVas, localOffsets, localTypes, recordMap, code); // push value
-        EmitExpr(stmt.Ptr,   varVas, localOffsets, localTypes, recordMap, code); // push pointer
-        code.AddRange(X86.PopEcx()); // ECX = pointer
-        code.AddRange(X86.PopEax()); // EAX = value
+        int fieldOffset = ResolveRecordFieldByteOffset(ptrType[1..], stmt.Field, ctx.RecordMap);
+        EmitExpr(stmt.Value, ctx);
+        EmitExpr(stmt.Ptr, ctx);
+        ctx.Code.AddRange(X86.PopEcx());
+        ctx.Code.AddRange(X86.PopEax());
         if (fieldOffset == 0)
-            code.AddRange(X86.MovMemEcxEax());
+            ctx.Code.AddRange(X86.MovMemEcxEax());
         else
-            code.AddRange(X86.MovMemEcxDisp8Eax((sbyte)fieldOffset));
+            ctx.Code.AddRange(X86.MovMemEcxDisp8Eax((sbyte)fieldOffset));
     }
 
-    static void EmitWhileStmt(
-        WhileStmt whileStmt,
-        Dictionary<string, ImportSpec> importMap,
-        Dictionary<string, uint> varVas,
-        Dictionary<string, int> localOffsets,
-        Dictionary<string, string> localTypes,
-        Dictionary<string, RecordDecl> recordMap,
-        List<byte> code,
-        List<IatRef> iatRefs,
-        List<ImportSpec> imports)
+    static void EmitWhileStmt(WhileStmt whileStmt, FunCtx ctx)
     {
-        int whileTop = code.Count;
+        int whileTop = ctx.Code.Count;
 
-        EmitExpr(whileStmt.Condition, varVas, localOffsets, localTypes, recordMap, code);
-        code.AddRange(X86.PopEax());
-        code.AddRange(X86.TestEaxEax());
-        code.AddRange(X86.JzRel32());
-        int jzPatch = code.Count - 4;
+        EmitExpr(whileStmt.Condition, ctx);
+        ctx.Code.AddRange(X86.PopEax());
+        ctx.Code.AddRange(X86.TestEaxEax());
+        ctx.Code.AddRange(X86.JzRel32());
+        int jzPatch = ctx.Code.Count - 4;
 
         var breakPatches    = new List<int>();
         var continuePatches = new List<int>();
 
-        EmitStmts(whileStmt.Body, importMap, varVas, localOffsets, localTypes, recordMap, code, iatRefs, imports, breakPatches, continuePatches);
+        EmitStmts(whileStmt.Body, ctx, breakPatches, continuePatches);
 
-        foreach (var p in continuePatches) X86.Backpatch(code, p, whileTop);
+        foreach (var p in continuePatches) X86.Backpatch(ctx.Code, p, whileTop);
 
-        code.AddRange(X86.JmpRel32());
-        X86.Backpatch(code, code.Count - 4, whileTop);
+        ctx.Code.AddRange(X86.JmpRel32());
+        X86.Backpatch(ctx.Code, ctx.Code.Count - 4, whileTop);
 
-        X86.Backpatch(code, jzPatch, code.Count);
-        foreach (var p in breakPatches) X86.Backpatch(code, p, code.Count);
+        X86.Backpatch(ctx.Code, jzPatch, ctx.Code.Count);
+        foreach (var p in breakPatches) X86.Backpatch(ctx.Code, p, ctx.Code.Count);
     }
 
-    static void EmitForStmt(
-        ForStmt forStmt,
-        Dictionary<string, ImportSpec> importMap,
-        Dictionary<string, uint> varVas,
-        Dictionary<string, int> localOffsets,
-        Dictionary<string, string> localTypes,
-        Dictionary<string, RecordDecl> recordMap,
-        List<byte> code,
-        List<IatRef> iatRefs,
-        List<ImportSpec> imports)
+    static void EmitForStmt(ForStmt forStmt, FunCtx ctx)
     {
-        // Init
-        EmitExpr(forStmt.VarInit, varVas, localOffsets, localTypes, recordMap, code);
-        code.AddRange(X86.PopToEbpDisp8((sbyte)localOffsets[forStmt.VarName]));
+        EmitExpr(forStmt.VarInit, ctx);
+        ctx.Code.AddRange(X86.PopToEbpDisp8((sbyte)ctx.Offsets[forStmt.VarName]));
 
-        // Condition check (loop top)
-        int loopTop = code.Count;
-        EmitExpr(forStmt.Condition, varVas, localOffsets, localTypes, recordMap, code);
-        code.AddRange(X86.PopEax());
-        code.AddRange(X86.TestEaxEax());
-        code.AddRange(X86.JzRel32());
-        int jzPatch = code.Count - 4;
+        int loopTop = ctx.Code.Count;
+        EmitExpr(forStmt.Condition, ctx);
+        ctx.Code.AddRange(X86.PopEax());
+        ctx.Code.AddRange(X86.TestEaxEax());
+        ctx.Code.AddRange(X86.JzRel32());
+        int jzPatch = ctx.Code.Count - 4;
 
         var breakPatches    = new List<int>();
         var continuePatches = new List<int>();
 
-        // Body
-        EmitStmts(forStmt.Body, importMap, varVas, localOffsets, localTypes, recordMap, code, iatRefs, imports, breakPatches, continuePatches);
+        EmitStmts(forStmt.Body, ctx, breakPatches, continuePatches);
 
-        // Post step — continue patches land here so post runs before re-checking the condition
-        int postOffset = code.Count;
-        foreach (var p in continuePatches) X86.Backpatch(code, p, postOffset);
+        int postOffset = ctx.Code.Count;
+        foreach (var p in continuePatches) X86.Backpatch(ctx.Code, p, postOffset);
 
-        EmitExpr(forStmt.PostValue, varVas, localOffsets, localTypes, recordMap, code);
-        code.AddRange(X86.PopToEbpDisp8((sbyte)localOffsets[forStmt.PostName]));
+        EmitExpr(forStmt.PostValue, ctx);
+        ctx.Code.AddRange(X86.PopToEbpDisp8((sbyte)ctx.Offsets[forStmt.PostName]));
 
-        // Back edge
-        code.AddRange(X86.JmpRel32());
-        X86.Backpatch(code, code.Count - 4, loopTop);
+        ctx.Code.AddRange(X86.JmpRel32());
+        X86.Backpatch(ctx.Code, ctx.Code.Count - 4, loopTop);
 
-        // Exit
-        X86.Backpatch(code, jzPatch, code.Count);
-        foreach (var p in breakPatches) X86.Backpatch(code, p, code.Count);
+        X86.Backpatch(ctx.Code, jzPatch, ctx.Code.Count);
+        foreach (var p in breakPatches) X86.Backpatch(ctx.Code, p, ctx.Code.Count);
     }
 
-    static void EmitLoopStmt(
-        LoopStmt loopStmt,
-        Dictionary<string, ImportSpec> importMap,
-        Dictionary<string, uint> varVas,
-        Dictionary<string, int> localOffsets,
-        Dictionary<string, string> localTypes,
-        Dictionary<string, RecordDecl> recordMap,
-        List<byte> code,
-        List<IatRef> iatRefs,
-        List<ImportSpec> imports)
+    static void EmitLoopStmt(LoopStmt loopStmt, FunCtx ctx)
     {
-        int loopTop = code.Count;
+        int loopTop = ctx.Code.Count;
 
         var breakPatches    = new List<int>();
         var continuePatches = new List<int>();
 
-        EmitStmts(loopStmt.Body, importMap, varVas, localOffsets, localTypes, recordMap, code, iatRefs, imports, breakPatches, continuePatches);
+        EmitStmts(loopStmt.Body, ctx, breakPatches, continuePatches);
 
-        foreach (var p in continuePatches) X86.Backpatch(code, p, loopTop);
+        foreach (var p in continuePatches) X86.Backpatch(ctx.Code, p, loopTop);
 
-        code.AddRange(X86.JmpRel32());
-        X86.Backpatch(code, code.Count - 4, loopTop);
+        ctx.Code.AddRange(X86.JmpRel32());
+        X86.Backpatch(ctx.Code, ctx.Code.Count - 4, loopTop);
 
-        foreach (var p in breakPatches) X86.Backpatch(code, p, code.Count);
+        foreach (var p in breakPatches) X86.Backpatch(ctx.Code, p, ctx.Code.Count);
     }
 
-    static void EmitLocalVarDecl(
-        LocalVarDecl decl,
-        Dictionary<string, uint> varVas,
-        Dictionary<string, int> localOffsets,
-        Dictionary<string, string> localTypes,
-        Dictionary<string, RecordDecl> recordMap,
-        List<byte> code)
+    static void EmitLocalVarDecl(LocalVarDecl decl, FunCtx ctx)
     {
         if (decl.Init is null) return;
-        EmitExpr(decl.Init, varVas, localOffsets, localTypes, recordMap, code);
-        code.AddRange(X86.PopToEbpDisp8((sbyte)localOffsets[decl.Name]));
+        EmitExpr(decl.Init, ctx);
+        ctx.Code.AddRange(X86.PopToEbpDisp8((sbyte)ctx.Offsets[decl.Name]));
     }
 
-    static void EmitCallStmt(
-        CallStmt stmt,
-        Dictionary<string, ImportSpec> importMap,
-        Dictionary<string, uint> varVas,
-        Dictionary<string, int> localOffsets,
-        Dictionary<string, string> localTypes,
-        Dictionary<string, RecordDecl> recordMap,
-        List<byte> code,
-        List<IatRef> iatRefs,
-        List<ImportSpec> imports)
+    static void EmitCallStmt(CallStmt stmt, FunCtx ctx)
     {
-        if (!importMap.TryGetValue(stmt.Callee, out var importSpec))
+        if (!ctx.ImportMap.TryGetValue(stmt.Callee, out var importSpec))
             throw new InvalidOperationException($"Unresolved call target '{stmt.Callee}'");
 
-        if (!imports.Contains(importSpec))
-            imports.Add(importSpec);
+        if (!ctx.Imports.Contains(importSpec))
+            ctx.Imports.Add(importSpec);
 
         // stdcall: push arguments right-to-left; callee cleans up.
         for (int i = stmt.Args.Count - 1; i >= 0; i--)
-            EmitExpr(stmt.Args[i], varVas, localOffsets, localTypes, recordMap, code);
+            EmitExpr(stmt.Args[i], ctx);
 
-        int iatOffset = code.Count + X86.CallIndirectMemAddressOffset;
-        code.AddRange(X86.CallIndirectMem());
-        iatRefs.Add(new IatRef(iatOffset, importSpec));
+        int iatOffset = ctx.Code.Count + X86.CallIndirectMemAddressOffset;
+        ctx.Code.AddRange(X86.CallIndirectMem());
+        ctx.IatRefs.Add(new IatRef(iatOffset, importSpec));
     }
 
-    static void EmitExpr(
-        Expr expr,
-        Dictionary<string, uint> varVas,
-        Dictionary<string, int> localOffsets,
-        Dictionary<string, string> localTypes,
-        Dictionary<string, RecordDecl> recordMap,
-        List<byte> code)
+    static void EmitReturnStmt(ReturnStmt stmt, FunCtx ctx)
+    {
+        if (stmt.Value is not null)
+        {
+            EmitExpr(stmt.Value, ctx);
+            ctx.Code.AddRange(X86.PopEax());
+        }
+        if (ctx.NeedsFrame)
+        {
+            if (ctx.LocalBytes > 0) ctx.Code.AddRange(X86.Leave());
+            else ctx.Code.AddRange(X86.PopEbp());
+        }
+        ctx.Code.AddRange(ctx.IsStdcall && ctx.ParamStackBytes > 0
+            ? X86.RetN((ushort)ctx.ParamStackBytes)
+            : X86.Ret());
+    }
+
+    static void EmitCallExpr(CallExpr callExpr, FunCtx ctx)
+    {
+        // Push args right-to-left (works for both cdecl and stdcall)
+        for (int i = callExpr.Args.Count - 1; i >= 0; i--)
+            EmitExpr(callExpr.Args[i], ctx);
+
+        // Unqualified call to a [dll_import] extern: use IAT-indirect call (stdcall, callee cleans up)
+        if (callExpr.Qualifier is null && ctx.ImportMap.TryGetValue(callExpr.Name, out var importSpec))
+        {
+            if (!ctx.Imports.Contains(importSpec))
+                ctx.Imports.Add(importSpec);
+            int iatOffset = ctx.Code.Count + X86.CallIndirectMemAddressOffset;
+            ctx.Code.AddRange(X86.CallIndirectMem());
+            ctx.IatRefs.Add(new IatRef(iatOffset, importSpec));
+            ctx.Code.AddRange(X86.PushEax());
+            return;
+        }
+
+        // Local (intra-binary) Pint function: call rel32 with backpatch (cdecl)
+        ctx.Code.AddRange(X86.CallRel32());
+        int patchOffset = ctx.Code.Count - 4;
+
+        string targetModule;
+        if (callExpr.Qualifier is not null)
+        {
+            if (!ctx.AliasMap.TryGetValue(callExpr.Qualifier, out targetModule!))
+                throw new InvalidOperationException($"Unknown import alias '{callExpr.Qualifier}'");
+        }
+        else
+            targetModule = ctx.ModuleName;
+
+        ctx.LocalCallRefs.Add(new LocalCallRef(patchOffset, targetModule, callExpr.Name));
+
+        // cdecl: caller cleans up arguments
+        if (callExpr.Args.Count > 0)
+            ctx.Code.AddRange(X86.AddEspImm8((byte)(callExpr.Args.Count * 4)));
+
+        // Return value is in EAX; push onto expression stack
+        ctx.Code.AddRange(X86.PushEax());
+    }
+
+    static void EmitExpr(Expr expr, FunCtx ctx)
     {
         switch (expr)
         {
             case IntLiteralExpr { Value: >= 0 and <= 127 } e:
-                code.AddRange(X86.PushImm8((byte)e.Value));
+                ctx.Code.AddRange(X86.PushImm8((byte)e.Value));
                 break;
             case IntLiteralExpr e:
-                code.AddRange(X86.PushImm32((uint)e.Value));
+                ctx.Code.AddRange(X86.PushImm32((uint)e.Value));
                 break;
             case BoolLiteralExpr { Value: true }:
-                code.AddRange(X86.PushImm8(1));
+                ctx.Code.AddRange(X86.PushImm8(1));
                 break;
             case BoolLiteralExpr { Value: false }:
-                code.AddRange(X86.PushImm8(0));
+                ctx.Code.AddRange(X86.PushImm8(0));
                 break;
-            case VarRefExpr v when localOffsets.TryGetValue(v.Name, out int off):
-                code.AddRange(X86.PushEbpDisp8((sbyte)off));
+            case VarRefExpr v when ctx.Offsets.TryGetValue(v.Name, out int off):
+                ctx.Code.AddRange(X86.PushEbpDisp8((sbyte)off));
                 break;
-            case VarRefExpr v when varVas.TryGetValue(v.Name, out uint va):
-                code.AddRange(X86.PushMem32(va));
+            case VarRefExpr v when ctx.VarVas.TryGetValue(v.Name, out uint va):
+                ctx.Code.AddRange(X86.PushMem32(va));
                 break;
             case VarRefExpr v:
                 throw new InvalidOperationException($"Undefined variable '{v.Name}'");
             case FieldAccessExpr fa:
-                int fieldOffset = ResolveFieldByteOffset(fa.VarName, fa.Path, localTypes, recordMap);
-                code.AddRange(X86.PushEbpDisp8((sbyte)(localOffsets[fa.VarName] + fieldOffset)));
+                int fieldOffset = ResolveFieldByteOffset(fa.VarName, fa.Path, ctx.Types, ctx.RecordMap);
+                ctx.Code.AddRange(X86.PushEbpDisp8((sbyte)(ctx.Offsets[fa.VarName] + fieldOffset)));
                 break;
             case IndexExpr ix:
-                EmitExpr(ix.Idx, varVas, localOffsets, localTypes, recordMap, code); // push index
-                code.AddRange(X86.PopEcx());                                          // ECX = index
-                code.AddRange(X86.MovEaxEbpEcx4Disp8((sbyte)localOffsets[ix.ArrayName]));
-                code.AddRange(X86.PushEax());
+                EmitExpr(ix.Idx, ctx);
+                ctx.Code.AddRange(X86.PopEcx());
+                ctx.Code.AddRange(X86.MovEaxEbpEcx4Disp8((sbyte)ctx.Offsets[ix.ArrayName]));
+                ctx.Code.AddRange(X86.PushEax());
                 break;
             case AddressOfExpr ao:
-                EmitAddressOfExpr(ao, varVas, localOffsets, localTypes, recordMap, code);
+                EmitAddressOfExpr(ao, ctx);
                 break;
             case DerefExpr deref:
-                EmitExpr(deref.Ptr, varVas, localOffsets, localTypes, recordMap, code);
-                code.AddRange(X86.PopEax());
-                code.AddRange(X86.MovEaxMemEax());
-                code.AddRange(X86.PushEax());
+                EmitExpr(deref.Ptr, ctx);
+                ctx.Code.AddRange(X86.PopEax());
+                ctx.Code.AddRange(X86.MovEaxMemEax());
+                ctx.Code.AddRange(X86.PushEax());
                 break;
             case ArrowExpr arrow: {
-                var arrowPtrType = GetExprType(arrow.Ptr, localTypes)
+                var arrowPtrType = GetExprType(arrow.Ptr, ctx.Types)
                     ?? throw new InvalidOperationException("Cannot determine pointer type for arrow expression");
-                int arrowFieldOffset = ResolveRecordFieldByteOffset(arrowPtrType[1..], arrow.Field, recordMap);
-                EmitExpr(arrow.Ptr, varVas, localOffsets, localTypes, recordMap, code);
-                code.AddRange(X86.PopEax());
+                int arrowFieldOffset = ResolveRecordFieldByteOffset(arrowPtrType[1..], arrow.Field, ctx.RecordMap);
+                EmitExpr(arrow.Ptr, ctx);
+                ctx.Code.AddRange(X86.PopEax());
                 if (arrowFieldOffset == 0)
-                    code.AddRange(X86.MovEaxMemEax());
+                    ctx.Code.AddRange(X86.MovEaxMemEax());
                 else
-                    code.AddRange(X86.MovEaxMemEaxDisp8((sbyte)arrowFieldOffset));
-                code.AddRange(X86.PushEax());
+                    ctx.Code.AddRange(X86.MovEaxMemEaxDisp8((sbyte)arrowFieldOffset));
+                ctx.Code.AddRange(X86.PushEax());
                 break;
             }
+            case CallExpr callExpr:
+                EmitCallExpr(callExpr, ctx);
+                break;
             case UnaryExpr u:
-                EmitExpr(u.Operand, varVas, localOffsets, localTypes, recordMap, code);
-                code.AddRange(X86.PopEax());
+                EmitExpr(u.Operand, ctx);
+                ctx.Code.AddRange(X86.PopEax());
                 switch (u.Op)
                 {
-                    case UnaryOp.Neg:    code.AddRange(X86.NegEax());    break;
-                    case UnaryOp.BitNot: code.AddRange(X86.NotEax());    break;
-                    case UnaryOp.Not:    code.AddRange(X86.XorEaxOne()); break;
+                    case UnaryOp.Neg:    ctx.Code.AddRange(X86.NegEax());    break;
+                    case UnaryOp.BitNot: ctx.Code.AddRange(X86.NotEax());    break;
+                    case UnaryOp.Not:    ctx.Code.AddRange(X86.XorEaxOne()); break;
                 }
-                code.AddRange(X86.PushEax());
+                ctx.Code.AddRange(X86.PushEax());
                 break;
             case BinaryExpr b: {
                 string? leftType = (b.Op is BinaryOp.Add or BinaryOp.Sub)
-                    ? GetExprType(b.Left, localTypes) : null;
-                EmitExpr(b.Left,  varVas, localOffsets, localTypes, recordMap, code);
-                EmitExpr(b.Right, varVas, localOffsets, localTypes, recordMap, code);
-                code.AddRange(X86.PopEcx()); // right
-                code.AddRange(X86.PopEax()); // left
+                    ? GetExprType(b.Left, ctx.Types) : null;
+                EmitExpr(b.Left, ctx);
+                EmitExpr(b.Right, ctx);
+                ctx.Code.AddRange(X86.PopEcx()); // right
+                ctx.Code.AddRange(X86.PopEax()); // left
                 if (leftType is not null && leftType.StartsWith('^'))
                 {
-                    int stride = StackSlotSize(leftType[1..], recordMap);
-                    if (stride != 1) code.AddRange(X86.ImulEcxImm8((byte)stride));
-                    code.AddRange(b.Op == BinaryOp.Add ? X86.AddEaxEcx() : X86.SubEaxEcx());
-                    code.AddRange(X86.PushEax());
+                    int stride = StackSlotSize(leftType[1..], ctx.RecordMap);
+                    if (stride != 1) ctx.Code.AddRange(X86.ImulEcxImm8((byte)stride));
+                    ctx.Code.AddRange(b.Op == BinaryOp.Add ? X86.AddEaxEcx() : X86.SubEaxEcx());
+                    ctx.Code.AddRange(X86.PushEax());
                 }
                 else
                 {
-                    EmitBinaryOp(b.Op, code);
+                    EmitBinaryOp(b.Op, ctx.Code);
                 }
                 break;
             }
@@ -641,30 +702,24 @@ static class Codegen
         }
     }
 
-    static void EmitAddressOfExpr(
-        AddressOfExpr ao,
-        Dictionary<string, uint> varVas,
-        Dictionary<string, int> localOffsets,
-        Dictionary<string, string> localTypes,
-        Dictionary<string, RecordDecl> recordMap,
-        List<byte> code)
+    static void EmitAddressOfExpr(AddressOfExpr ao, FunCtx ctx)
     {
         switch (ao.Operand)
         {
-            case VarRefExpr v when localOffsets.TryGetValue(v.Name, out int off):
-                code.AddRange(X86.LeaEaxEbpDisp8((sbyte)off));
-                code.AddRange(X86.PushEax());
+            case VarRefExpr v when ctx.Offsets.TryGetValue(v.Name, out int off):
+                ctx.Code.AddRange(X86.LeaEaxEbpDisp8((sbyte)off));
+                ctx.Code.AddRange(X86.PushEax());
                 break;
             case IndexExpr ix:
-                EmitExpr(ix.Idx, varVas, localOffsets, localTypes, recordMap, code);
-                code.AddRange(X86.PopEcx());
-                code.AddRange(X86.LeaEaxEbpEcx4Disp8((sbyte)localOffsets[ix.ArrayName]));
-                code.AddRange(X86.PushEax());
+                EmitExpr(ix.Idx, ctx);
+                ctx.Code.AddRange(X86.PopEcx());
+                ctx.Code.AddRange(X86.LeaEaxEbpEcx4Disp8((sbyte)ctx.Offsets[ix.ArrayName]));
+                ctx.Code.AddRange(X86.PushEax());
                 break;
             case FieldAccessExpr fa:
-                int faOffset = ResolveFieldByteOffset(fa.VarName, fa.Path, localTypes, recordMap);
-                code.AddRange(X86.LeaEaxEbpDisp8((sbyte)(localOffsets[fa.VarName] + faOffset)));
-                code.AddRange(X86.PushEax());
+                int faOffset = ResolveFieldByteOffset(fa.VarName, fa.Path, ctx.Types, ctx.RecordMap);
+                ctx.Code.AddRange(X86.LeaEaxEbpDisp8((sbyte)(ctx.Offsets[fa.VarName] + faOffset)));
+                ctx.Code.AddRange(X86.PushEax());
                 break;
             default:
                 throw new NotSupportedException($"Address-of not supported for {ao.Operand.GetType().Name}");

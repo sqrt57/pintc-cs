@@ -21,6 +21,7 @@ enum BinaryOp
 enum UnaryOp { Neg, BitNot, Not }
 
 abstract record Expr;
+record CallExpr(string? Qualifier, string Name, List<Expr> Args) : Expr;
 record IntLiteralExpr(long Value) : Expr;
 record BoolLiteralExpr(bool Value) : Expr;
 record VarRefExpr(string Name) : Expr;
@@ -34,6 +35,7 @@ record ArrowExpr(Expr Ptr, string Field) : Expr;
 
 abstract record Stmt;
 record CallStmt(string Callee, List<Expr> Args) : Stmt;
+record ReturnStmt(Expr? Value) : Stmt;
 record LocalVarDecl(string Name, string TypeName, Expr? Init) : Stmt;
 record AssignStmt(string Name, Expr Value) : Stmt;
 record IndexAssignStmt(string ArrayName, Expr Idx, Expr Value) : Stmt;
@@ -68,9 +70,23 @@ record FunDecl(
 // A module-scope variable declaration.
 record ModuleVarDecl(string Name, string TypeName, Expr? Init);
 
+record ImportDecl(string ModuleName, string Alias);
+
 record ModuleDecl(
     string Name,
     List<ExternFunDecl> Externs,
     List<FunDecl> Funs,
     List<ModuleVarDecl> Vars,
-    List<RecordDecl> Records);
+    List<RecordDecl> Records,
+    List<ImportDecl> Imports,
+    List<string> Exports)
+{
+    // Backwards-compatible constructor for test fixtures that don't use import/export.
+    public ModuleDecl(
+        string Name,
+        List<ExternFunDecl> Externs,
+        List<FunDecl> Funs,
+        List<ModuleVarDecl> Vars,
+        List<RecordDecl> Records)
+        : this(Name, Externs, Funs, Vars, Records, [], []) { }
+}
