@@ -224,6 +224,8 @@ static class Codegen
         return offset;
     }
 
+    static bool IsLiteralExpr(Expr expr) => expr is IntLiteralExpr or BoolLiteralExpr;
+
     // Same-named vars in sibling for loops share the last-allocated slot (harmless today; breaks if loops overlap).
     static void CollectLocals(
         IEnumerable<Stmt> stmts,
@@ -239,6 +241,12 @@ static class Codegen
                 localBytes       += StackSlotSize(lv.TypeName, recordMap);
                 offsets[lv.Name]  = -localBytes;
                 types[lv.Name]    = lv.TypeName;
+            }
+            else if (stmt is LocalConstDecl lc && !IsLiteralExpr(lc.Init))
+            {
+                localBytes       += StackSlotSize(lc.TypeName, recordMap);
+                offsets[lc.Name]  = -localBytes;
+                types[lc.Name]    = lc.TypeName;
             }
             else if (stmt is IfStmt ifStmt)
             {
@@ -330,7 +338,13 @@ static class Codegen
             switch (stmt)
             {
                 case LocalConstDecl lc:
-                    ctx.Consts[lc.Name] = lc.Init;
+                    if (IsLiteralExpr(lc.Init))
+                        ctx.Consts[lc.Name] = lc.Init;
+                    else
+                    {
+                        EmitExpr(lc.Init, ctx);
+                        ctx.Code.AddRange(X86.PopToEbpDisp8((sbyte)ctx.Offsets[lc.Name]));
+                    }
                     break;
                 case LocalVarDecl lv:
                     EmitLocalVarDecl(lv, ctx);

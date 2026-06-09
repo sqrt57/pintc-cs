@@ -610,4 +610,32 @@ public static class SliceFixtures
             }
         }
         """;
+
+    // Demonstrates the re-evaluation bug: const initializer is a call whose side
+    // effect is visible through a pointer. With the bug the call runs once per use
+    // (a=1, b=2). With the fix it runs once at the declaration (a=1, b=1).
+    public const string Slice12ConstReevalSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            fun inc_and_get(p: ^u32) -> u32 {
+                p^ = p^ + 1;
+                return p^;
+            }
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var count: u32 = 0;
+                const BASE: u32 = inc_and_get(@count);
+                var a: u32 = BASE;
+                var b: u32 = BASE;
+                if (a != b) { exit_process(1); }
+                exit_process(0);
+            }
+        }
+        """;
 }
