@@ -48,6 +48,7 @@ class Parser(List<Token> tokens)
         var externs = new List<ExternFunDecl>();
         var funs    = new List<FunDecl>();
         var vars    = new List<ModuleVarDecl>();
+        var records = new List<RecordDecl>();
 
         while (!Check(TokenKind.RBrace) && !Check(TokenKind.Eof))
         {
@@ -70,15 +71,21 @@ class Parser(List<Token> tokens)
                 if (v is null) return null;
                 vars.Add(v);
             }
+            else if (Check(TokenKind.Record))
+            {
+                var rec = ParseRecordDecl();
+                if (rec is null) return null;
+                records.Add(rec);
+            }
             else
             {
-                Error($"expected 'extern', 'fun', or 'var', got '{Current.Text}'");
+                Error($"expected 'extern', 'fun', 'record', or 'var', got '{Current.Text}'");
                 return null;
             }
         }
 
         if (Eat(TokenKind.RBrace) is null) return null;
-        return new ModuleDecl(name.Text, externs, funs, vars);
+        return new ModuleDecl(name.Text, externs, funs, vars, records);
     }
 
     // ── Attributes ─────────────────────────────────────────────────────────────
@@ -138,6 +145,27 @@ class Parser(List<Token> tokens)
     }
 
     // ── Declarations ───────────────────────────────────────────────────────────
+
+    RecordDecl? ParseRecordDecl()
+    {
+        if (Eat(TokenKind.Record) is null) return null;
+        var name = Eat(TokenKind.Ident);
+        if (name is null) return null;
+        if (Eat(TokenKind.LBrace) is null) return null;
+        var fields = new List<RecordField>();
+        while (!Check(TokenKind.RBrace) && !Check(TokenKind.Eof))
+        {
+            var fname = Eat(TokenKind.Ident);
+            if (fname is null) return null;
+            if (Eat(TokenKind.Colon) is null) return null;
+            var ftype = ParseType();
+            if (ftype is null) return null;
+            if (Eat(TokenKind.Semicolon) is null) return null;
+            fields.Add(new RecordField(fname.Text, ftype));
+        }
+        if (Eat(TokenKind.RBrace) is null) return null;
+        return new RecordDecl(name.Text, fields);
+    }
 
     ExternFunDecl? ParseExternFunDecl(List<Attr> attrs)
     {
@@ -264,6 +292,8 @@ class Parser(List<Token> tokens)
             return ParseBreakStmt();
         if (Check(TokenKind.Continue))
             return ParseContinueStmt();
+        if (Check(TokenKind.Ident) && Peek().Kind == TokenKind.Dot)
+            return ParseFieldAssignStmt();
         if (Check(TokenKind.Ident) && Peek().Kind == TokenKind.Eq)
             return ParseAssignStmt();
         if (Check(TokenKind.Ident) && Peek().Kind == TokenKind.LBracket)
@@ -384,6 +414,24 @@ class Parser(List<Token> tokens)
         if (Eat(TokenKind.Continue) is null) return null;
         if (Eat(TokenKind.Semicolon) is null) return null;
         return new ContinueStmt();
+    }
+
+    FieldAssignStmt? ParseFieldAssignStmt()
+    {
+        var name = Eat(TokenKind.Ident);
+        if (name is null) return null;
+        var path = new List<string>();
+        while (TryEat(TokenKind.Dot))
+        {
+            var field = Eat(TokenKind.Ident);
+            if (field is null) return null;
+            path.Add(field.Text);
+        }
+        if (Eat(TokenKind.Eq) is null) return null;
+        var value = ParseExpr();
+        if (value is null) return null;
+        if (Eat(TokenKind.Semicolon) is null) return null;
+        return new FieldAssignStmt(name.Text, path, value);
     }
 
     AssignStmt? ParseAssignStmt()
@@ -657,6 +705,17 @@ class Parser(List<Token> tokens)
                 if (idx is null) return null;
                 if (Eat(TokenKind.RBracket) is null) return null;
                 return new IndexExpr(identName, idx);
+            }
+            if (Check(TokenKind.Dot))
+            {
+                var path = new List<string>();
+                while (TryEat(TokenKind.Dot))
+                {
+                    var field = Eat(TokenKind.Ident);
+                    if (field is null) return null;
+                    path.Add(field.Text);
+                }
+                return new FieldAccessExpr(identName, path);
             }
             return new VarRefExpr(identName);
         }

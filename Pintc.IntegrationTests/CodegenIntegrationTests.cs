@@ -31,7 +31,7 @@ public class CodegenIntegrationTests : IDisposable
                 "()",
                 [new CallStmt("exit_process", [new IntLiteralExpr(0)])])
         ],
-        Vars: []);
+        Vars: [], Records: []);
 
     static readonly ModuleDecl Slice2Module = new(
         "main",
@@ -53,7 +53,8 @@ public class CodegenIntegrationTests : IDisposable
                 "()",
                 [new CallStmt("exit_process", [new VarRefExpr("exit_code")])])
         ],
-        Vars: [new ModuleVarDecl("exit_code", "u32", new IntLiteralExpr(3))]);
+        Vars: [new ModuleVarDecl("exit_code", "u32", new IntLiteralExpr(3))],
+        Records: []);
 
     [Fact]
     public void Slice1_codegenAndPeWriter_produceRunningExe()

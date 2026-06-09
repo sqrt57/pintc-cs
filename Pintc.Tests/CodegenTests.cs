@@ -25,7 +25,7 @@ public class CodegenTests
                 "()",
                 [new CallStmt("exit_process", [new IntLiteralExpr(0)])])
         ],
-        Vars: []);
+        Vars: [], Records: []);
 
     [Fact]
     public void EntryPoint_emits_push0_then_callIndirect()
@@ -80,7 +80,7 @@ public class CodegenTests
                     "main", [], "()",
                     [new CallStmt("exit_process", [new IntLiteralExpr(0)])]),
             ],
-            Vars: []);
+            Vars: [], Records: []);
 
         // For coverage of prologue/epilogue, construct a standalone emission of a regular FunDecl.
         // Codegen.Emit only processes the entry point for now; test the x86 helpers directly.
@@ -150,7 +150,7 @@ public class CodegenTests
                         new CallStmt("exit_process", [new VarRefExpr("i")])
                     ])
             ],
-            Vars: []);
+            Vars: [], Records: []);
 
         var unit = Codegen.Emit(module);
 
@@ -204,7 +204,7 @@ public class CodegenTests
                         new CallStmt("exit_process", [new VarRefExpr("exit_code")])
                     ])
             ],
-            Vars: []);
+            Vars: [], Records: []);
 
         var unit = Codegen.Emit(module);
 
