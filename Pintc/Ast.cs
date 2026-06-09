@@ -30,6 +30,7 @@ record UnaryExpr(UnaryOp Op, Expr Operand) : Expr;
 abstract record Stmt;
 record CallStmt(string Callee, List<Expr> Args) : Stmt;
 record LocalVarDecl(string Name, string TypeName, Expr? Init) : Stmt;
+record IfStmt(Expr Condition, List<Stmt> Then, List<Stmt>? Else) : Stmt;
 
 // An extern function imported from a DLL.
 record ExternFunDecl(

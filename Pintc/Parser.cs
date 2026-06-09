@@ -163,17 +163,8 @@ class Parser(List<Token> tokens)
         if (Eat(TokenKind.Arrow) is null) return null;
         var ret = ParseType();
         if (ret is null) return null;
-        if (Eat(TokenKind.LBrace) is null) return null;
-
-        var body = new List<Stmt>();
-        while (!Check(TokenKind.RBrace) && !Check(TokenKind.Eof))
-        {
-            var stmt = ParseStmt();
-            if (stmt is null) return null;
-            body.Add(stmt);
-        }
-
-        if (Eat(TokenKind.RBrace) is null) return null;
+        var body = ParseBlock();
+        if (body is null) return null;
         return new FunDecl(attrs, name.Text, parms, ret, body);
     }
 
@@ -249,7 +240,52 @@ class Parser(List<Token> tokens)
     {
         if (Check(TokenKind.Var))
             return ParseLocalVarDecl();
+        if (Check(TokenKind.If))
+            return ParseIfStmt();
         return ParseCallStmt();
+    }
+
+    List<Stmt>? ParseBlock()
+    {
+        if (Eat(TokenKind.LBrace) is null) return null;
+        var stmts = new List<Stmt>();
+        while (!Check(TokenKind.RBrace) && !Check(TokenKind.Eof))
+        {
+            var stmt = ParseStmt();
+            if (stmt is null) return null;
+            stmts.Add(stmt);
+        }
+        if (Eat(TokenKind.RBrace) is null) return null;
+        return stmts;
+    }
+
+    IfStmt? ParseIfStmt()
+    {
+        if (Eat(TokenKind.If) is null) return null;
+        if (Eat(TokenKind.LParen) is null) return null;
+        var cond = ParseExpr();
+        if (cond is null) return null;
+        if (Eat(TokenKind.RParen) is null) return null;
+        var then = ParseBlock();
+        if (then is null) return null;
+
+        List<Stmt>? elseBranch = null;
+        if (TryEat(TokenKind.Else))
+        {
+            if (Check(TokenKind.If))
+            {
+                var elseIf = ParseIfStmt();
+                if (elseIf is null) return null;
+                elseBranch = [elseIf];
+            }
+            else
+            {
+                elseBranch = ParseBlock();
+                if (elseBranch is null) return null;
+            }
+        }
+
+        return new IfStmt(cond, then, elseBranch);
     }
 
     LocalVarDecl? ParseLocalVarDecl()

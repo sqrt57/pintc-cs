@@ -84,15 +84,10 @@ static class Codegen
         bool isEntryPoint = fun.Attributes.Any(a => a.Name == "win32_entry");
         bool isNoReturn   = fun.Attributes.Any(a => a.Name == "noreturn");
 
-        // Allocate stack slots for local variables in declaration order.
+        // Allocate stack slots for all local variables in the function (including nested blocks).
         var localOffsets = new Dictionary<string, int>();
         int localBytes   = 0;
-        foreach (var stmt in fun.Body)
-        {
-            if (stmt is not LocalVarDecl lv) continue;
-            localBytes            += StackSlotSize(lv.TypeName);
-            localOffsets[lv.Name]  = -localBytes;
-        }
+        CollectLocals(fun.Body, localOffsets, ref localBytes);
 
         // Emit a frame when the function has locals or is a regular (non-entry) function.
         // The Win32 entry point is called directly by the OS with no caller frame, but we
@@ -106,18 +101,7 @@ static class Codegen
                 code.AddRange(X86.SubEspImm8((byte)localBytes));
         }
 
-        foreach (var stmt in fun.Body)
-        {
-            switch (stmt)
-            {
-                case LocalVarDecl lv:
-                    EmitLocalVarDecl(lv, localOffsets, varVas, code);
-                    break;
-                case CallStmt call:
-                    EmitCallStmt(call, importMap, varVas, localOffsets, code, iatRefs, imports);
-                    break;
-            }
-        }
+        EmitStmts(fun.Body, importMap, varVas, localOffsets, code, iatRefs, imports);
 
         if (!isNoReturn)
         {
@@ -130,6 +114,85 @@ static class Codegen
                     code.AddRange(X86.PopEbp());
             }
             code.AddRange(X86.Ret());
+        }
+    }
+
+    static void CollectLocals(IEnumerable<Stmt> stmts, Dictionary<string, int> localOffsets, ref int localBytes)
+    {
+        foreach (var stmt in stmts)
+        {
+            if (stmt is LocalVarDecl lv)
+            {
+                localBytes            += StackSlotSize(lv.TypeName);
+                localOffsets[lv.Name]  = -localBytes;
+            }
+            else if (stmt is IfStmt ifStmt)
+            {
+                CollectLocals(ifStmt.Then, localOffsets, ref localBytes);
+                if (ifStmt.Else is not null)
+                    CollectLocals(ifStmt.Else, localOffsets, ref localBytes);
+            }
+        }
+    }
+
+    static void EmitStmts(
+        IEnumerable<Stmt> stmts,
+        Dictionary<string, ImportSpec> importMap,
+        Dictionary<string, uint> varVas,
+        Dictionary<string, int> localOffsets,
+        List<byte> code,
+        List<IatRef> iatRefs,
+        List<ImportSpec> imports)
+    {
+        foreach (var stmt in stmts)
+        {
+            switch (stmt)
+            {
+                case LocalVarDecl lv:
+                    EmitLocalVarDecl(lv, localOffsets, varVas, code);
+                    break;
+                case CallStmt call:
+                    EmitCallStmt(call, importMap, varVas, localOffsets, code, iatRefs, imports);
+                    break;
+                case IfStmt ifStmt:
+                    EmitIfStmt(ifStmt, importMap, varVas, localOffsets, code, iatRefs, imports);
+                    break;
+            }
+        }
+    }
+
+    static void EmitIfStmt(
+        IfStmt ifStmt,
+        Dictionary<string, ImportSpec> importMap,
+        Dictionary<string, uint> varVas,
+        Dictionary<string, int> localOffsets,
+        List<byte> code,
+        List<IatRef> iatRefs,
+        List<ImportSpec> imports)
+    {
+        EmitExpr(ifStmt.Condition, varVas, localOffsets, code);
+        code.AddRange(X86.PopEax());
+        code.AddRange(X86.TestEaxEax());
+
+        code.AddRange(X86.JzRel32());
+        int jzPatch = code.Count - 4; // displacement field to patch
+
+        EmitStmts(ifStmt.Then, importMap, varVas, localOffsets, code, iatRefs, imports);
+
+        if (ifStmt.Else is null)
+        {
+            X86.Backpatch(code, jzPatch, code.Count);
+        }
+        else
+        {
+            code.AddRange(X86.JmpRel32());
+            int jmpPatch = code.Count - 4;
+
+            X86.Backpatch(code, jzPatch, code.Count);
+
+            EmitStmts(ifStmt.Else, importMap, varVas, localOffsets, code, iatRefs, imports);
+
+            X86.Backpatch(code, jmpPatch, code.Count);
         }
     }
 

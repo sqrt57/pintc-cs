@@ -88,4 +88,28 @@ static class X86
 
     // xor eax, 1 — inverts a bool (0→1, 1→0)
     public static byte[] XorEaxOne() => [0x83, 0xF0, 0x01];
+
+    // test eax, eax — sets ZF=1 if EAX is zero, ZF=0 otherwise
+    public static byte[] TestEaxEax() => [0x85, 0xC0];
+
+    // jz rel32 — jump if ZF=1 (condition was false); placeholder offset at bytes [2..5]
+    public static byte[] JzRel32() => [0x0F, 0x84, 0x00, 0x00, 0x00, 0x00];
+    public const int JzRel32OffsetAt = 2;
+
+    // jmp rel32 — unconditional jump; placeholder offset at bytes [1..4]
+    public static byte[] JmpRel32() => [0xE9, 0x00, 0x00, 0x00, 0x00];
+    public const int JmpRel32OffsetAt = 1;
+
+    // Writes a 32-bit signed relative displacement into a previously emitted jump.
+    // patchAt: byte index of the first byte of the 4-byte displacement field.
+    // target: byte index in code that the jump should reach.
+    // The CPU computes new_eip = (patchAt + 4) + displacement, so displacement = target - (patchAt + 4).
+    public static void Backpatch(List<byte> code, int patchAt, int target)
+    {
+        int rel = target - (patchAt + 4);
+        code[patchAt]     = (byte) rel;
+        code[patchAt + 1] = (byte)(rel >> 8);
+        code[patchAt + 2] = (byte)(rel >> 16);
+        code[patchAt + 3] = (byte)(rel >> 24);
+    }
 }
