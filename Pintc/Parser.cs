@@ -209,7 +209,7 @@ class Parser(List<Token> tokens)
         return parms;
     }
 
-    // Returns "()" for unit type, or the keyword/ident text for named types.
+    // Returns "()" for unit type, "[N]T" for array types, or the keyword/ident text for named types.
     string? ParseType()
     {
         if (Check(TokenKind.LParen))
@@ -217,6 +217,17 @@ class Parser(List<Token> tokens)
             Advance();
             if (Eat(TokenKind.RParen) is null) return null;
             return "()";
+        }
+
+        if (Check(TokenKind.LBracket))
+        {
+            Advance();
+            var sizeTok = Eat(TokenKind.IntLit);
+            if (sizeTok is null) return null;
+            if (Eat(TokenKind.RBracket) is null) return null;
+            var elemType = ParseType();
+            if (elemType is null) return null;
+            return $"[{sizeTok.Text}]{elemType}";
         }
 
         if (IsTypeName(Current.Kind))
@@ -255,6 +266,8 @@ class Parser(List<Token> tokens)
             return ParseContinueStmt();
         if (Check(TokenKind.Ident) && Peek().Kind == TokenKind.Eq)
             return ParseAssignStmt();
+        if (Check(TokenKind.Ident) && Peek().Kind == TokenKind.LBracket)
+            return ParseIndexAssignStmt();
         return ParseCallStmt();
     }
 
@@ -382,6 +395,21 @@ class Parser(List<Token> tokens)
         if (value is null) return null;
         if (Eat(TokenKind.Semicolon) is null) return null;
         return new AssignStmt(name.Text, value);
+    }
+
+    IndexAssignStmt? ParseIndexAssignStmt()
+    {
+        var name = Eat(TokenKind.Ident);
+        if (name is null) return null;
+        if (Eat(TokenKind.LBracket) is null) return null;
+        var idx = ParseExpr();
+        if (idx is null) return null;
+        if (Eat(TokenKind.RBracket) is null) return null;
+        if (Eat(TokenKind.Eq) is null) return null;
+        var value = ParseExpr();
+        if (value is null) return null;
+        if (Eat(TokenKind.Semicolon) is null) return null;
+        return new IndexAssignStmt(name.Text, idx, value);
     }
 
     LocalVarDecl? ParseLocalVarDecl()
@@ -621,7 +649,17 @@ class Parser(List<Token> tokens)
         if (Check(TokenKind.False)) { Advance(); return new BoolLiteralExpr(false); }
 
         if (Check(TokenKind.Ident))
-            return new VarRefExpr(Advance().Text);
+        {
+            var identName = Advance().Text;
+            if (TryEat(TokenKind.LBracket))
+            {
+                var idx = ParseExpr();
+                if (idx is null) return null;
+                if (Eat(TokenKind.RBracket) is null) return null;
+                return new IndexExpr(identName, idx);
+            }
+            return new VarRefExpr(identName);
+        }
 
         if (Check(TokenKind.LParen))
         {

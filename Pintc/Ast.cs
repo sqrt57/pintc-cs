@@ -26,11 +26,13 @@ record BoolLiteralExpr(bool Value) : Expr;
 record VarRefExpr(string Name) : Expr;
 record BinaryExpr(BinaryOp Op, Expr Left, Expr Right) : Expr;
 record UnaryExpr(UnaryOp Op, Expr Operand) : Expr;
+record IndexExpr(string ArrayName, Expr Idx) : Expr;
 
 abstract record Stmt;
 record CallStmt(string Callee, List<Expr> Args) : Stmt;
 record LocalVarDecl(string Name, string TypeName, Expr? Init) : Stmt;
 record AssignStmt(string Name, Expr Value) : Stmt;
+record IndexAssignStmt(string ArrayName, Expr Idx, Expr Value) : Stmt;
 record IfStmt(Expr Condition, List<Stmt> Then, List<Stmt>? Else) : Stmt;
 record WhileStmt(Expr Condition, List<Stmt> Body) : Stmt;
 record LoopStmt(List<Stmt> Body) : Stmt;

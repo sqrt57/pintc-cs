@@ -61,8 +61,17 @@ static class Codegen
         return (varVas, data);
     }
 
-    // All local variable stack slots are dword-sized; type size governs .data layout only.
-    static int StackSlotSize(string _) => 4;
+    // Scalar locals occupy one dword; arrays occupy N dwords (one per element).
+    static int StackSlotSize(string typeName)
+    {
+        if (typeName.StartsWith('['))
+        {
+            int close = typeName.IndexOf(']');
+            int n = int.Parse(typeName[1..close]);
+            return n * 4;
+        }
+        return 4;
+    }
 
     static int TypeSize(string typeName) => typeName switch
     {
@@ -166,6 +175,9 @@ static class Codegen
                 case AssignStmt assign:
                     EmitAssignStmt(assign, localOffsets, varVas, code);
                     break;
+                case IndexAssignStmt indexAssign:
+                    EmitIndexAssignStmt(indexAssign, localOffsets, varVas, code);
+                    break;
                 case CallStmt call:
                     EmitCallStmt(call, importMap, varVas, localOffsets, code, iatRefs, imports);
                     break;
@@ -238,6 +250,19 @@ static class Codegen
     {
         EmitExpr(stmt.Value, varVas, localOffsets, code);
         code.AddRange(X86.PopToEbpDisp8((sbyte)localOffsets[stmt.Name]));
+    }
+
+    static void EmitIndexAssignStmt(
+        IndexAssignStmt stmt,
+        Dictionary<string, int> localOffsets,
+        Dictionary<string, uint> varVas,
+        List<byte> code)
+    {
+        EmitExpr(stmt.Value, varVas, localOffsets, code); // push value
+        EmitExpr(stmt.Idx,   varVas, localOffsets, code); // push index
+        code.AddRange(X86.PopEcx());                       // ECX = index
+        code.AddRange(X86.PopEax());                       // EAX = value
+        code.AddRange(X86.MovEbpEcx4Disp8Eax((sbyte)localOffsets[stmt.ArrayName]));
     }
 
     static void EmitWhileStmt(
@@ -397,6 +422,12 @@ static class Codegen
                 break;
             case VarRefExpr v:
                 throw new InvalidOperationException($"Undefined variable '{v.Name}'");
+            case IndexExpr ix:
+                EmitExpr(ix.Idx, varVas, localOffsets, code);  // push index
+                code.AddRange(X86.PopEcx());                    // ECX = index
+                code.AddRange(X86.MovEaxEbpEcx4Disp8((sbyte)localOffsets[ix.ArrayName]));
+                code.AddRange(X86.PushEax());
+                break;
             case UnaryExpr u:
                 EmitExpr(u.Operand, varVas, localOffsets, code);
                 code.AddRange(X86.PopEax());

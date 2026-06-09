@@ -46,6 +46,12 @@ static class X86
     // pop dword ptr [ebp+disp8] — stores TOS into a local variable slot
     public static byte[] PopToEbpDisp8(sbyte disp) => [0x8F, 0x45, (byte)disp];
 
+    // mov eax, [ebp + ecx*4 + disp8] — loads array element (base in EBP, index in ECX, scale 4)
+    public static byte[] MovEaxEbpEcx4Disp8(sbyte disp) => [0x8B, 0x44, 0x8D, (byte)disp];
+
+    // mov [ebp + ecx*4 + disp8], eax — stores EAX into array element
+    public static byte[] MovEbpEcx4Disp8Eax(sbyte disp) => [0x89, 0x44, 0x8D, (byte)disp];
+
     // leave — mov esp,ebp; pop ebp (standard frame teardown)
     public static byte[] Leave() => [0xC9];
 
