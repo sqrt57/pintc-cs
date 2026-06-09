@@ -243,6 +243,8 @@ class Parser(List<Token> tokens)
             return ParseLocalVarDecl();
         if (Check(TokenKind.If))
             return ParseIfStmt();
+        if (Check(TokenKind.For))
+            return ParseForStmt();
         if (Check(TokenKind.While))
             return ParseWhileStmt();
         if (Check(TokenKind.Loop))
@@ -309,6 +311,44 @@ class Parser(List<Token> tokens)
         var body = ParseBlock();
         if (body is null) return null;
         return new WhileStmt(cond, body);
+    }
+
+    ForStmt? ParseForStmt()
+    {
+        if (Eat(TokenKind.For) is null) return null;
+        if (Eat(TokenKind.LParen) is null) return null;
+
+        // ForInit: "var" identifier ":" Type "=" Expr
+        if (Eat(TokenKind.Var) is null) return null;
+        var varName = Eat(TokenKind.Ident);
+        if (varName is null) return null;
+        if (Eat(TokenKind.Colon) is null) return null;
+        var varType = ParseType();
+        if (varType is null) return null;
+        if (Eat(TokenKind.Eq) is null) return null;
+        var varInit = ParseExpr();
+        if (varInit is null) return null;
+
+        if (Eat(TokenKind.Semicolon) is null) return null;
+
+        var cond = ParseExpr();
+        if (cond is null) return null;
+
+        if (Eat(TokenKind.Semicolon) is null) return null;
+
+        // ForPost: identifier "=" Expr
+        var postName = Eat(TokenKind.Ident);
+        if (postName is null) return null;
+        if (Eat(TokenKind.Eq) is null) return null;
+        var postValue = ParseExpr();
+        if (postValue is null) return null;
+
+        if (Eat(TokenKind.RParen) is null) return null;
+
+        var body = ParseBlock();
+        if (body is null) return null;
+
+        return new ForStmt(varName.Text, varType, varInit, cond, postName.Text, postValue, body);
     }
 
     LoopStmt? ParseLoopStmt()

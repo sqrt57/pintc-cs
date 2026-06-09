@@ -136,6 +136,12 @@ static class Codegen
                 CollectLocals(whileStmt.Body, localOffsets, ref localBytes);
             else if (stmt is LoopStmt loopStmt)
                 CollectLocals(loopStmt.Body, localOffsets, ref localBytes);
+            else if (stmt is ForStmt forStmt)
+            {
+                localBytes             += StackSlotSize(forStmt.VarTypeName);
+                localOffsets[forStmt.VarName] = -localBytes;
+                CollectLocals(forStmt.Body, localOffsets, ref localBytes);
+            }
         }
     }
 
@@ -165,6 +171,9 @@ static class Codegen
                     break;
                 case IfStmt ifStmt:
                     EmitIfStmt(ifStmt, importMap, varVas, localOffsets, code, iatRefs, imports, breakPatches, continuePatches);
+                    break;
+                case ForStmt forStmt:
+                    EmitForStmt(forStmt, importMap, varVas, localOffsets, code, iatRefs, imports);
                     break;
                 case WhileStmt whileStmt:
                     EmitWhileStmt(whileStmt, importMap, varVas, localOffsets, code, iatRefs, imports);
@@ -258,6 +267,49 @@ static class Codegen
         code.AddRange(X86.JmpRel32());
         X86.Backpatch(code, code.Count - 4, whileTop);
 
+        X86.Backpatch(code, jzPatch, code.Count);
+        foreach (var p in breakPatches) X86.Backpatch(code, p, code.Count);
+    }
+
+    static void EmitForStmt(
+        ForStmt forStmt,
+        Dictionary<string, ImportSpec> importMap,
+        Dictionary<string, uint> varVas,
+        Dictionary<string, int> localOffsets,
+        List<byte> code,
+        List<IatRef> iatRefs,
+        List<ImportSpec> imports)
+    {
+        // Init
+        EmitExpr(forStmt.VarInit, varVas, localOffsets, code);
+        code.AddRange(X86.PopToEbpDisp8((sbyte)localOffsets[forStmt.VarName]));
+
+        // Condition check (loop top)
+        int loopTop = code.Count;
+        EmitExpr(forStmt.Condition, varVas, localOffsets, code);
+        code.AddRange(X86.PopEax());
+        code.AddRange(X86.TestEaxEax());
+        code.AddRange(X86.JzRel32());
+        int jzPatch = code.Count - 4;
+
+        var breakPatches    = new List<int>();
+        var continuePatches = new List<int>();
+
+        // Body
+        EmitStmts(forStmt.Body, importMap, varVas, localOffsets, code, iatRefs, imports, breakPatches, continuePatches);
+
+        // Post step — continue patches land here so post runs before re-checking the condition
+        int postOffset = code.Count;
+        foreach (var p in continuePatches) X86.Backpatch(code, p, postOffset);
+
+        EmitExpr(forStmt.PostValue, varVas, localOffsets, code);
+        code.AddRange(X86.PopToEbpDisp8((sbyte)localOffsets[forStmt.PostName]));
+
+        // Back edge
+        code.AddRange(X86.JmpRel32());
+        X86.Backpatch(code, code.Count - 4, loopTop);
+
+        // Exit
         X86.Backpatch(code, jzPatch, code.Count);
         foreach (var p in breakPatches) X86.Backpatch(code, p, code.Count);
     }

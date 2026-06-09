@@ -36,6 +36,7 @@ record WhileStmt(Expr Condition, List<Stmt> Body) : Stmt;
 record LoopStmt(List<Stmt> Body) : Stmt;
 record BreakStmt : Stmt;
 record ContinueStmt : Stmt;
+record ForStmt(string VarName, string VarTypeName, Expr VarInit, Expr Condition, string PostName, Expr PostValue, List<Stmt> Body) : Stmt;
 
 // An extern function imported from a DLL.
 record ExternFunDecl(
