@@ -484,4 +484,84 @@ public static class SliceFixtures
             }
         }
         """;
+
+    public const string Slice11TwoModulesSource = """
+        module Calc {
+            fun add(a: u32, b: u32) -> u32 {
+                return a + b;
+            }
+            export add;
+        }
+
+        module main {
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            import Calc as C;
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var result: u32 = C.add(3, 4);
+                if (result != 7) { exit_process(1); }
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice11CalcSource = """
+        module Calc {
+            fun add(a: u32, b: u32) -> u32 {
+                return a + b;
+            }
+            export add;
+        }
+        """;
+
+    public const string Slice11MainSource = """
+        module main {
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            import Calc as C;
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var result: u32 = C.add(3, 4);
+                if (result != 7) { exit_process(1); }
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice11DllLibSource = """
+        module MathLib {
+            [dll_export]
+            fun add(a: u32, b: u32) -> u32 {
+                return a + b;
+            }
+        }
+        """;
+
+    public const string Slice11DllMainSource = """
+        module main {
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            [dll_import(dll="mathlib.dll", entry_point="add")]
+            extern fun math_add(a: u32, b: u32) -> u32;
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var result: u32 = math_add(3, 4);
+                if (result != 7) { exit_process(1); }
+                exit_process(0);
+            }
+        }
+        """;
 }
