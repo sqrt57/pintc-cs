@@ -18,7 +18,8 @@ record FunCtx(
     int                                 LocalBytes,
     bool                                NeedsFrame,
     bool                                IsStdcall,     // true for [dll_export] functions (callee cleans up)
-    int                                 ParamStackBytes);
+    int                                 ParamStackBytes,
+    Dictionary<string, Expr>            Consts);
 
 static class Codegen
 {
@@ -301,7 +302,7 @@ static class Codegen
         var ctx = new FunCtx(importMap, varVas, offsets, types, recordMap,
                              code, iatRefs, imports,
                              moduleName, aliasMap, localCallRefs,
-                             localBytes, needsFrame, isStdcall, paramStackBytes);
+                             localBytes, needsFrame, isStdcall, paramStackBytes, []);
 
         EmitStmts(fun.Body, ctx);
 
@@ -328,6 +329,9 @@ static class Codegen
         {
             switch (stmt)
             {
+                case LocalConstDecl lc:
+                    ctx.Consts[lc.Name] = lc.Init;
+                    break;
                 case LocalVarDecl lv:
                     EmitLocalVarDecl(lv, ctx);
                     break;
@@ -622,6 +626,9 @@ static class Codegen
                 break;
             case BoolLiteralExpr { Value: false }:
                 ctx.Code.AddRange(X86.PushImm8(0));
+                break;
+            case VarRefExpr v when ctx.Consts.TryGetValue(v.Name, out var constExpr):
+                EmitExpr(constExpr, ctx);
                 break;
             case VarRefExpr v when ctx.Offsets.TryGetValue(v.Name, out int off):
                 ctx.Code.AddRange(X86.PushEbpDisp8((sbyte)off));

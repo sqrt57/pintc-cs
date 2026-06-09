@@ -381,6 +381,8 @@ class Parser(List<Token> tokens)
             return ParseBreakStmt();
         if (Check(TokenKind.Continue))
             return ParseContinueStmt();
+        if (Check(TokenKind.Const))
+            return ParseLocalConstDecl();
         if (Check(TokenKind.Ident) && Peek().Kind == TokenKind.Dot)
             return ParseFieldAssignStmt();
         if (Check(TokenKind.Ident) && Peek().Kind == TokenKind.Eq)
@@ -577,6 +579,21 @@ class Parser(List<Token> tokens)
         if (value is null) return null;
         if (Eat(TokenKind.Semicolon) is null) return null;
         return new ArrowAssignStmt(new VarRefExpr(name.Text), field.Text, value);
+    }
+
+    LocalConstDecl? ParseLocalConstDecl()
+    {
+        if (Eat(TokenKind.Const) is null) return null;
+        var name = Eat(TokenKind.Ident);
+        if (name is null) return null;
+        if (Eat(TokenKind.Colon) is null) return null;
+        var type = ParseType();
+        if (type is null) return null;
+        if (Eat(TokenKind.Eq) is null) return null;
+        var init = ParseExpr();
+        if (init is null) return null;
+        if (Eat(TokenKind.Semicolon) is null) return null;
+        return new LocalConstDecl(name.Text, type, init);
     }
 
     LocalVarDecl? ParseLocalVarDecl()

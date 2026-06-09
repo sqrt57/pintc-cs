@@ -143,6 +143,32 @@ public class ParserTests
 
     // ── Local var decl ─────────────────────────────────────────────────────────
 
+    // ── Local const decl ───────────────────────────────────────────────────────
+
+    [Fact]
+    public void LocalConstDecl_parses_name_type_and_init()
+    {
+        var m = Parse("module x { fun f() -> () { const LIMIT: u32 = 10; } }");
+        m.ShouldNotBeNull();
+        var lc = m!.Funs[0].Body[0].ShouldBeOfType<LocalConstDecl>();
+        lc.Name.ShouldBe("LIMIT");
+        lc.TypeName.ShouldBe("u32");
+        lc.Init.ShouldBeOfType<IntLiteralExpr>().Value.ShouldBe(10L);
+    }
+
+    [Fact]
+    public void LocalConstDecl_bool_init()
+    {
+        var m = Parse("module x { fun f() -> () { const OK: bool = true; } }");
+        m.ShouldNotBeNull();
+        var lc = m!.Funs[0].Body[0].ShouldBeOfType<LocalConstDecl>();
+        lc.Name.ShouldBe("OK");
+        lc.TypeName.ShouldBe("bool");
+        lc.Init.ShouldBeOfType<BoolLiteralExpr>().Value.ShouldBeTrue();
+    }
+
+    // ── Local var decl ─────────────────────────────────────────────────────────
+
     [Fact]
     public void LocalVarDecl_with_initializer()
     {

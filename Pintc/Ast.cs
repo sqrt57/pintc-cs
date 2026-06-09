@@ -48,6 +48,7 @@ record LoopStmt(List<Stmt> Body) : Stmt;
 record BreakStmt : Stmt;
 record ContinueStmt : Stmt;
 record ForStmt(string VarName, string VarTypeName, Expr VarInit, Expr Condition, string PostName, Expr PostValue, List<Stmt> Body) : Stmt;
+record LocalConstDecl(string Name, string TypeName, Expr Init) : Stmt;
 
 record RecordField(string Name, string TypeName);
 record RecordDecl(string Name, List<RecordField> Fields);
