@@ -122,6 +122,56 @@ public class CodegenTests
         X86.PopToEbpDisp8(-4).ShouldBe(new byte[] { 0x8F, 0x45, 0xFC });
     }
 
+    // ── Slice 6 codegen ────────────────────────────────────────────────────────
+
+    [Fact]
+    public void AssignStmt_emits_eval_and_store()
+    {
+        // var i: u32 = 0; i = i + 1; exit_process(i);
+        var module = new ModuleDecl(
+            "main",
+            Externs:
+            [
+                new ExternFunDecl(
+                    [new Attr("dll_import", new() { ["dll"] = "kernel32.dll", ["entry_point"] = "ExitProcess" }),
+                     new Attr("noreturn")],
+                    "exit_process",
+                    [new Param("code", "u32")],
+                    "()")
+            ],
+            Funs:
+            [
+                new FunDecl(
+                    [new Attr("win32_entry"), new Attr("noreturn")],
+                    "main", [], "()",
+                    [
+                        new LocalVarDecl("i", "u32", new IntLiteralExpr(0)),
+                        new AssignStmt("i", new BinaryExpr(BinaryOp.Add, new VarRefExpr("i"), new IntLiteralExpr(1))),
+                        new CallStmt("exit_process", [new VarRefExpr("i")])
+                    ])
+            ],
+            Vars: []);
+
+        var unit = Codegen.Emit(module);
+
+        unit.Code.ShouldBe(new byte[]
+        {
+            0x55, 0x89, 0xE5,             // push ebp; mov ebp,esp
+            0x83, 0xEC, 0x04,             // sub esp,4
+            0x6A, 0x00,                   // push 0  (init i)
+            0x8F, 0x45, 0xFC,             // pop [ebp-4]  (store i)
+            0xFF, 0x75, 0xFC,             // push [ebp-4]  (load i)
+            0x6A, 0x01,                   // push 1
+            0x59,                         // pop ecx  (right)
+            0x58,                         // pop eax  (left)
+            0x03, 0xC1,                   // add eax,ecx
+            0x50,                         // push eax
+            0x8F, 0x45, 0xFC,             // pop [ebp-4]  (assign i)
+            0xFF, 0x75, 0xFC,             // push [ebp-4]  (load i for call)
+            0xFF, 0x15, 0x00, 0x00, 0x00, 0x00,  // call [ExitProcess]
+        });
+    }
+
     [Fact]
     public void Leave_emits_C9()
     {

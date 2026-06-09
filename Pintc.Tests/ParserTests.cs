@@ -217,6 +217,66 @@ public class ParserTests
         call.Args[0].ShouldBeOfType<IntLiteralExpr>().Value.ShouldBe(0L);
     }
 
+    // ── Slice 6 — while, loop, break, continue, assign ────────────────────────
+
+    [Fact]
+    public void AssignStmt_parses_name_and_expr()
+    {
+        var m = Parse("module x { fun f() -> () { var i: u32 = 0; i = i + 1; } }");
+        m.ShouldNotBeNull();
+        var assign = m!.Funs[0].Body[1].ShouldBeOfType<AssignStmt>();
+        assign.Name.ShouldBe("i");
+        var add = assign.Value.ShouldBeOfType<BinaryExpr>();
+        add.Op.ShouldBe(BinaryOp.Add);
+        add.Left.ShouldBeOfType<VarRefExpr>().Name.ShouldBe("i");
+        add.Right.ShouldBeOfType<IntLiteralExpr>().Value.ShouldBe(1L);
+    }
+
+    [Fact]
+    public void WhileStmt_parses_condition_and_body()
+    {
+        var m = Parse("module x { fun f() -> () { while (true) { g(0); } } }");
+        m.ShouldNotBeNull();
+        var w = m!.Funs[0].Body[0].ShouldBeOfType<WhileStmt>();
+        w.Condition.ShouldBeOfType<BoolLiteralExpr>().Value.ShouldBeTrue();
+        w.Body.ShouldHaveSingleItem();
+        w.Body[0].ShouldBeOfType<CallStmt>().Callee.ShouldBe("g");
+    }
+
+    [Fact]
+    public void LoopStmt_parses_body()
+    {
+        var m = Parse("module x { fun f() -> () { loop { break; } } }");
+        m.ShouldNotBeNull();
+        var l = m!.Funs[0].Body[0].ShouldBeOfType<LoopStmt>();
+        l.Body.ShouldHaveSingleItem();
+        l.Body[0].ShouldBeOfType<BreakStmt>();
+    }
+
+    [Fact]
+    public void BreakStmt_parses()
+    {
+        var m = Parse("module x { fun f() -> () { loop { break; } } }");
+        m.ShouldNotBeNull();
+        m!.Funs[0].Body[0].ShouldBeOfType<LoopStmt>().Body[0].ShouldBeOfType<BreakStmt>();
+    }
+
+    [Fact]
+    public void ContinueStmt_parses()
+    {
+        var m = Parse("module x { fun f() -> () { while (true) { continue; } } }");
+        m.ShouldNotBeNull();
+        m!.Funs[0].Body[0].ShouldBeOfType<WhileStmt>().Body[0].ShouldBeOfType<ContinueStmt>();
+    }
+
+    [Fact]
+    public void Slice6_source_parses_without_errors()
+    {
+        var (m, diag) = ParseWithDiagnostics(SliceFixtures.Slice6Source);
+        diag.ShouldBeEmpty();
+        m.ShouldNotBeNull();
+    }
+
     [Fact]
     public void Slice2_source_parses_to_expected_ast()
     {

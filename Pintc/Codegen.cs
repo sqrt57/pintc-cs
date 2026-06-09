@@ -132,6 +132,10 @@ static class Codegen
                 if (ifStmt.Else is not null)
                     CollectLocals(ifStmt.Else, localOffsets, ref localBytes);
             }
+            else if (stmt is WhileStmt whileStmt)
+                CollectLocals(whileStmt.Body, localOffsets, ref localBytes);
+            else if (stmt is LoopStmt loopStmt)
+                CollectLocals(loopStmt.Body, localOffsets, ref localBytes);
         }
     }
 
@@ -142,7 +146,9 @@ static class Codegen
         Dictionary<string, int> localOffsets,
         List<byte> code,
         List<IatRef> iatRefs,
-        List<ImportSpec> imports)
+        List<ImportSpec> imports,
+        List<int>? breakPatches = null,
+        List<int>? continuePatches = null)
     {
         foreach (var stmt in stmts)
         {
@@ -151,11 +157,28 @@ static class Codegen
                 case LocalVarDecl lv:
                     EmitLocalVarDecl(lv, localOffsets, varVas, code);
                     break;
+                case AssignStmt assign:
+                    EmitAssignStmt(assign, localOffsets, varVas, code);
+                    break;
                 case CallStmt call:
                     EmitCallStmt(call, importMap, varVas, localOffsets, code, iatRefs, imports);
                     break;
                 case IfStmt ifStmt:
-                    EmitIfStmt(ifStmt, importMap, varVas, localOffsets, code, iatRefs, imports);
+                    EmitIfStmt(ifStmt, importMap, varVas, localOffsets, code, iatRefs, imports, breakPatches, continuePatches);
+                    break;
+                case WhileStmt whileStmt:
+                    EmitWhileStmt(whileStmt, importMap, varVas, localOffsets, code, iatRefs, imports);
+                    break;
+                case LoopStmt loopStmt:
+                    EmitLoopStmt(loopStmt, importMap, varVas, localOffsets, code, iatRefs, imports);
+                    break;
+                case BreakStmt:
+                    code.AddRange(X86.JmpRel32());
+                    breakPatches!.Add(code.Count - 4);
+                    break;
+                case ContinueStmt:
+                    code.AddRange(X86.JmpRel32());
+                    continuePatches!.Add(code.Count - 4);
                     break;
             }
         }
@@ -168,16 +191,18 @@ static class Codegen
         Dictionary<string, int> localOffsets,
         List<byte> code,
         List<IatRef> iatRefs,
-        List<ImportSpec> imports)
+        List<ImportSpec> imports,
+        List<int>? breakPatches = null,
+        List<int>? continuePatches = null)
     {
         EmitExpr(ifStmt.Condition, varVas, localOffsets, code);
         code.AddRange(X86.PopEax());
         code.AddRange(X86.TestEaxEax());
 
         code.AddRange(X86.JzRel32());
-        int jzPatch = code.Count - 4; // displacement field to patch
+        int jzPatch = code.Count - 4;
 
-        EmitStmts(ifStmt.Then, importMap, varVas, localOffsets, code, iatRefs, imports);
+        EmitStmts(ifStmt.Then, importMap, varVas, localOffsets, code, iatRefs, imports, breakPatches, continuePatches);
 
         if (ifStmt.Else is null)
         {
@@ -190,10 +215,75 @@ static class Codegen
 
             X86.Backpatch(code, jzPatch, code.Count);
 
-            EmitStmts(ifStmt.Else, importMap, varVas, localOffsets, code, iatRefs, imports);
+            EmitStmts(ifStmt.Else, importMap, varVas, localOffsets, code, iatRefs, imports, breakPatches, continuePatches);
 
             X86.Backpatch(code, jmpPatch, code.Count);
         }
+    }
+
+    static void EmitAssignStmt(
+        AssignStmt stmt,
+        Dictionary<string, int> localOffsets,
+        Dictionary<string, uint> varVas,
+        List<byte> code)
+    {
+        EmitExpr(stmt.Value, varVas, localOffsets, code);
+        code.AddRange(X86.PopToEbpDisp8((sbyte)localOffsets[stmt.Name]));
+    }
+
+    static void EmitWhileStmt(
+        WhileStmt whileStmt,
+        Dictionary<string, ImportSpec> importMap,
+        Dictionary<string, uint> varVas,
+        Dictionary<string, int> localOffsets,
+        List<byte> code,
+        List<IatRef> iatRefs,
+        List<ImportSpec> imports)
+    {
+        int whileTop = code.Count;
+
+        EmitExpr(whileStmt.Condition, varVas, localOffsets, code);
+        code.AddRange(X86.PopEax());
+        code.AddRange(X86.TestEaxEax());
+        code.AddRange(X86.JzRel32());
+        int jzPatch = code.Count - 4;
+
+        var breakPatches    = new List<int>();
+        var continuePatches = new List<int>();
+
+        EmitStmts(whileStmt.Body, importMap, varVas, localOffsets, code, iatRefs, imports, breakPatches, continuePatches);
+
+        foreach (var p in continuePatches) X86.Backpatch(code, p, whileTop);
+
+        code.AddRange(X86.JmpRel32());
+        X86.Backpatch(code, code.Count - 4, whileTop);
+
+        X86.Backpatch(code, jzPatch, code.Count);
+        foreach (var p in breakPatches) X86.Backpatch(code, p, code.Count);
+    }
+
+    static void EmitLoopStmt(
+        LoopStmt loopStmt,
+        Dictionary<string, ImportSpec> importMap,
+        Dictionary<string, uint> varVas,
+        Dictionary<string, int> localOffsets,
+        List<byte> code,
+        List<IatRef> iatRefs,
+        List<ImportSpec> imports)
+    {
+        int loopTop = code.Count;
+
+        var breakPatches    = new List<int>();
+        var continuePatches = new List<int>();
+
+        EmitStmts(loopStmt.Body, importMap, varVas, localOffsets, code, iatRefs, imports, breakPatches, continuePatches);
+
+        foreach (var p in continuePatches) X86.Backpatch(code, p, loopTop);
+
+        code.AddRange(X86.JmpRel32());
+        X86.Backpatch(code, code.Count - 4, loopTop);
+
+        foreach (var p in breakPatches) X86.Backpatch(code, p, code.Count);
     }
 
     static void EmitLocalVarDecl(

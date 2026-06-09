@@ -16,6 +16,7 @@ class Parser(List<Token> tokens)
     }
 
     bool Check(TokenKind kind) => Current.Kind == kind;
+    Token Peek() => _pos + 1 < tokens.Count ? tokens[_pos + 1] : tokens[^1];
 
     Token? Eat(TokenKind kind)
     {
@@ -242,6 +243,16 @@ class Parser(List<Token> tokens)
             return ParseLocalVarDecl();
         if (Check(TokenKind.If))
             return ParseIfStmt();
+        if (Check(TokenKind.While))
+            return ParseWhileStmt();
+        if (Check(TokenKind.Loop))
+            return ParseLoopStmt();
+        if (Check(TokenKind.Break))
+            return ParseBreakStmt();
+        if (Check(TokenKind.Continue))
+            return ParseContinueStmt();
+        if (Check(TokenKind.Ident) && Peek().Kind == TokenKind.Eq)
+            return ParseAssignStmt();
         return ParseCallStmt();
     }
 
@@ -286,6 +297,51 @@ class Parser(List<Token> tokens)
         }
 
         return new IfStmt(cond, then, elseBranch);
+    }
+
+    WhileStmt? ParseWhileStmt()
+    {
+        if (Eat(TokenKind.While) is null) return null;
+        if (Eat(TokenKind.LParen) is null) return null;
+        var cond = ParseExpr();
+        if (cond is null) return null;
+        if (Eat(TokenKind.RParen) is null) return null;
+        var body = ParseBlock();
+        if (body is null) return null;
+        return new WhileStmt(cond, body);
+    }
+
+    LoopStmt? ParseLoopStmt()
+    {
+        if (Eat(TokenKind.Loop) is null) return null;
+        var body = ParseBlock();
+        if (body is null) return null;
+        return new LoopStmt(body);
+    }
+
+    BreakStmt? ParseBreakStmt()
+    {
+        if (Eat(TokenKind.Break) is null) return null;
+        if (Eat(TokenKind.Semicolon) is null) return null;
+        return new BreakStmt();
+    }
+
+    ContinueStmt? ParseContinueStmt()
+    {
+        if (Eat(TokenKind.Continue) is null) return null;
+        if (Eat(TokenKind.Semicolon) is null) return null;
+        return new ContinueStmt();
+    }
+
+    AssignStmt? ParseAssignStmt()
+    {
+        var name = Eat(TokenKind.Ident);
+        if (name is null) return null;
+        if (Eat(TokenKind.Eq) is null) return null;
+        var value = ParseExpr();
+        if (value is null) return null;
+        if (Eat(TokenKind.Semicolon) is null) return null;
+        return new AssignStmt(name.Text, value);
     }
 
     LocalVarDecl? ParseLocalVarDecl()
