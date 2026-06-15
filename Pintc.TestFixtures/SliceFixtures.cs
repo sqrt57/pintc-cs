@@ -655,6 +655,126 @@ public static class SliceFixtures
         }
         """;
 
+    public const string Slice14CharLiteralsSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var a: byte = 'A';
+                if (a != 65) { exit_process(1); }
+
+                var nl: byte = '\n';
+                if (nl != 10) { exit_process(2); }
+
+                var tab: byte = '\t';
+                if (tab != 9) { exit_process(3); }
+
+                var bs: byte = '\\';
+                if (bs != 92) { exit_process(4); }
+
+                var nul: byte = '\0';
+                if (nul != 0) { exit_process(5); }
+
+                var sq: byte = '\'';
+                if (sq != 39) { exit_process(6); }
+
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice14StringLenSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            const EMPTY: string = "";
+            const HELLO: string = "hello";
+            const MSG: string = "Hello, world!";
+            const ESC: string = "a\nb";
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                if (EMPTY.len != 0) { exit_process(1); }
+                if (HELLO.len != 5) { exit_process(2); }
+                if (MSG.len != 13) { exit_process(3); }
+                if (ESC.len != 3) { exit_process(4); }
+
+                const WORD: string = "Pint";
+                if (WORD.len != 4) { exit_process(5); }
+
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice14StringPtrSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            const MSG: string = "ABC";
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var p: ^byte = MSG.ptr;
+
+                if (p^ != 'A') { exit_process(1); }
+
+                p = p + 1;
+                if (p^ != 'B') { exit_process(2); }
+
+                p = p + 1;
+                if (p^ != 'C') { exit_process(3); }
+
+                // null terminator at ptr + len
+                p = p + 1;
+                if (p^ != 0) { exit_process(4); }
+
+                exit_process(0);
+            }
+        }
+        """;
+
+    // STD_OUTPUT_HANDLE = (DWORD)(-11) = 0xFFFFFFF5
+    public const string Slice14StringWriteSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            [dll_import(dll="kernel32.dll", entry_point="GetStdHandle")]
+            extern fun get_std_handle(nStdHandle: u32) -> u32;
+
+            [dll_import(dll="kernel32.dll", entry_point="WriteFile")]
+            extern fun write_file(hFile: u32, lpBuffer: ^byte, nNumberOfBytesToWrite: u32, lpNumberOfBytesWritten: ^u32, lpOverlapped: u32) -> u32;
+
+            const STD_OUTPUT_HANDLE: u32 = 0xFFFFFFF5;
+            const GREETING: string = "Hello, Pint!";
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var handle: u32 = get_std_handle(STD_OUTPUT_HANDLE);
+                var written: u32 = 0;
+                write_file(handle, GREETING.ptr, GREETING.len, @written, 0);
+                exit_process(0);
+            }
+        }
+        """;
+
     // Demonstrates the re-evaluation bug: const initializer is a call whose side
     // effect is visible through a pointer. With the bug the call runs once per use
     // (a=1, b=2). With the fix it runs once at the declaration (a=1, b=1).
