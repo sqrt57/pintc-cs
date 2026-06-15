@@ -34,10 +34,12 @@ static class Codegen
         var allExterns = modules.SelectMany(m => m.Externs).ToList();
         var allVars    = modules.SelectMany(m => m.Vars).ToList();
         var allRecords = modules.SelectMany(m => m.Records).ToList();
+        var allConsts  = modules.SelectMany(m => m.Consts).ToList();
 
-        var importMap = BuildImportMap(allExterns);
+        var importMap    = BuildImportMap(allExterns);
         var (varVas, dataBytes) = BuildDataSection(allVars);
-        var recordMap = BuildRecordMap(allRecords);
+        var recordMap    = BuildRecordMap(allRecords);
+        var moduleConsts = BuildModuleConstMap(allConsts);
 
         var code          = new List<byte>();
         var iatRefs       = new List<IatRef>();
@@ -59,7 +61,7 @@ static class Codegen
                 {
                     funOffsets[(mod.Name, fun.Name)] = code.Count;
                     EmitFun(fun, mod.Name, moduleAliases[mod.Name],
-                            importMap, varVas, recordMap, code, iatRefs, imports, localCallRefs);
+                            importMap, varVas, recordMap, moduleConsts, code, iatRefs, imports, localCallRefs);
                 }
         }
         else
@@ -77,7 +79,7 @@ static class Codegen
 
             funOffsets[(entryModule.Name, entryFun.Name)] = code.Count;
             EmitFun(entryFun, entryModule.Name, moduleAliases[entryModule.Name],
-                    importMap, varVas, recordMap, code, iatRefs, imports, localCallRefs);
+                    importMap, varVas, recordMap, moduleConsts, code, iatRefs, imports, localCallRefs);
 
             foreach (var mod in modules)
                 foreach (var fun in mod.Funs)
@@ -85,7 +87,7 @@ static class Codegen
                     if (fun == entryFun) continue;
                     funOffsets[(mod.Name, fun.Name)] = code.Count;
                     EmitFun(fun, mod.Name, moduleAliases[mod.Name],
-                            importMap, varVas, recordMap, code, iatRefs, imports, localCallRefs);
+                            importMap, varVas, recordMap, moduleConsts, code, iatRefs, imports, localCallRefs);
                 }
         }
 
@@ -226,6 +228,109 @@ static class Codegen
 
     static bool IsLiteralExpr(Expr expr) => expr is IntLiteralExpr or BoolLiteralExpr;
 
+    static Dictionary<string, Expr> BuildModuleConstMap(List<ModuleConstDecl> consts)
+    {
+        var resolved   = new Dictionary<string, Expr>();
+        var constInits = consts.ToDictionary(c => c.Name, c => c.Init);
+        foreach (var c in consts)
+            ResolveModuleConst(c.Name, constInits, resolved);
+        return resolved;
+    }
+
+    static void ResolveModuleConst(
+        string name,
+        Dictionary<string, Expr> constInits,
+        Dictionary<string, Expr> resolved)
+    {
+        if (resolved.ContainsKey(name)) return;
+        if (!constInits.TryGetValue(name, out var init))
+            throw new InvalidOperationException($"Undefined module const '{name}'");
+        resolved[name] = EvalConstExpr(init, constInits, resolved);
+    }
+
+    static Expr EvalConstExpr(
+        Expr expr,
+        Dictionary<string, Expr> constInits,
+        Dictionary<string, Expr> resolved)
+    {
+        switch (expr)
+        {
+            case IntLiteralExpr or BoolLiteralExpr:
+                return expr;
+            case VarRefExpr v:
+                ResolveModuleConst(v.Name, constInits, resolved);
+                return resolved[v.Name];
+            case UnaryExpr u:
+                return EvalConstUnary(u.Op, EvalConstExpr(u.Operand, constInits, resolved));
+            case BinaryExpr b:
+                return EvalConstBinary(b.Op,
+                    EvalConstExpr(b.Left,  constInits, resolved),
+                    EvalConstExpr(b.Right, constInits, resolved));
+            default:
+                throw new InvalidOperationException(
+                    $"Non-constant expression in module const initializer: {expr.GetType().Name}");
+        }
+    }
+
+    static Expr EvalConstUnary(UnaryOp op, Expr operand) =>
+        operand switch
+        {
+            IntLiteralExpr ie => op switch
+            {
+                UnaryOp.Neg    => new IntLiteralExpr(-ie.Value),
+                UnaryOp.BitNot => new IntLiteralExpr(~ie.Value),
+                _ => throw new InvalidOperationException($"Unsupported unary op '{op}' on integer const")
+            },
+            BoolLiteralExpr be => op switch
+            {
+                UnaryOp.Not => new BoolLiteralExpr(!be.Value),
+                _ => throw new InvalidOperationException($"Unsupported unary op '{op}' on bool const")
+            },
+            _ => throw new InvalidOperationException("Unexpected operand type in const unary")
+        };
+
+    static Expr EvalConstBinary(BinaryOp op, Expr left, Expr right)
+    {
+        if (left is IntLiteralExpr li && right is IntLiteralExpr ri)
+        {
+            long l = li.Value, r = ri.Value;
+            return op switch
+            {
+                BinaryOp.Add    => new IntLiteralExpr(l + r),
+                BinaryOp.Sub    => new IntLiteralExpr(l - r),
+                BinaryOp.Mul    => new IntLiteralExpr(l * r),
+                BinaryOp.Div    => new IntLiteralExpr(l / r),
+                BinaryOp.Mod    => new IntLiteralExpr(l % r),
+                BinaryOp.BitAnd => new IntLiteralExpr(l & r),
+                BinaryOp.BitOr  => new IntLiteralExpr(l | r),
+                BinaryOp.BitXor => new IntLiteralExpr(l ^ r),
+                BinaryOp.Shl    => new IntLiteralExpr(l << (int)r),
+                BinaryOp.Shr    => new IntLiteralExpr(l >> (int)r),
+                BinaryOp.And    => new IntLiteralExpr(l & r),
+                BinaryOp.Or     => new IntLiteralExpr(l | r),
+                BinaryOp.Eq     => new BoolLiteralExpr(l == r),
+                BinaryOp.Ne     => new BoolLiteralExpr(l != r),
+                BinaryOp.Lt     => new BoolLiteralExpr(l <  r),
+                BinaryOp.Le     => new BoolLiteralExpr(l <= r),
+                BinaryOp.Gt     => new BoolLiteralExpr(l >  r),
+                BinaryOp.Ge     => new BoolLiteralExpr(l >= r),
+                _ => throw new InvalidOperationException($"Unsupported binary op '{op}' on integer consts")
+            };
+        }
+        if (left is BoolLiteralExpr lb && right is BoolLiteralExpr rb)
+        {
+            return op switch
+            {
+                BinaryOp.And => new BoolLiteralExpr(lb.Value && rb.Value),
+                BinaryOp.Or  => new BoolLiteralExpr(lb.Value || rb.Value),
+                BinaryOp.Eq  => new BoolLiteralExpr(lb.Value == rb.Value),
+                BinaryOp.Ne  => new BoolLiteralExpr(lb.Value != rb.Value),
+                _ => throw new InvalidOperationException($"Unsupported binary op '{op}' on bool consts")
+            };
+        }
+        throw new InvalidOperationException("Mixed or unsupported types in const binary expression");
+    }
+
     // Same-named vars in sibling for loops share the last-allocated slot (harmless today; breaks if loops overlap).
     static void CollectLocals(
         IEnumerable<Stmt> stmts,
@@ -275,6 +380,7 @@ static class Codegen
         Dictionary<string, ImportSpec> importMap,
         Dictionary<string, uint> varVas,
         Dictionary<string, RecordDecl> recordMap,
+        Dictionary<string, Expr> moduleConsts,
         List<byte> code,
         List<IatRef> iatRefs,
         List<ImportSpec> imports,
@@ -310,7 +416,8 @@ static class Codegen
         var ctx = new FunCtx(importMap, varVas, offsets, types, recordMap,
                              code, iatRefs, imports,
                              moduleName, aliasMap, localCallRefs,
-                             localBytes, needsFrame, isStdcall, paramStackBytes, []);
+                             localBytes, needsFrame, isStdcall, paramStackBytes,
+                             new Dictionary<string, Expr>(moduleConsts));
 
         EmitStmts(fun.Body, ctx);
 

@@ -71,6 +71,9 @@ record FunDecl(
 // A module-scope variable declaration.
 record ModuleVarDecl(string Name, string TypeName, Expr? Init);
 
+// A module-scope constant declaration.
+record ModuleConstDecl(string Name, string TypeName, Expr Init);
+
 record ImportDecl(string ModuleName, string Alias);
 
 record ModuleDecl(
@@ -80,14 +83,15 @@ record ModuleDecl(
     List<ModuleVarDecl> Vars,
     List<RecordDecl> Records,
     List<ImportDecl> Imports,
-    List<string> Exports)
+    List<string> Exports,
+    List<ModuleConstDecl> Consts)
 {
-    // Backwards-compatible constructor for test fixtures that don't use import/export.
+    // Backwards-compatible constructor for test fixtures that don't use import/export/consts.
     public ModuleDecl(
         string Name,
         List<ExternFunDecl> Externs,
         List<FunDecl> Funs,
         List<ModuleVarDecl> Vars,
         List<RecordDecl> Records)
-        : this(Name, Externs, Funs, Vars, Records, [], []) { }
+        : this(Name, Externs, Funs, Vars, Records, [], [], []) { }
 }

@@ -64,6 +64,7 @@ class Parser(List<Token> tokens)
         var records = new List<RecordDecl>();
         var imports = new List<ImportDecl>();
         var exports = new List<string>();
+        var consts  = new List<ModuleConstDecl>();
 
         while (!Check(TokenKind.RBrace) && !Check(TokenKind.Eof))
         {
@@ -104,15 +105,21 @@ class Parser(List<Token> tokens)
                 if (exp is null) return null;
                 exports.Add(exp);
             }
+            else if (Check(TokenKind.Const))
+            {
+                var c = ParseModuleConstDecl();
+                if (c is null) return null;
+                consts.Add(c);
+            }
             else
             {
-                Error($"expected 'extern', 'fun', 'record', 'var', 'import', or 'export', got '{Current.Text}'");
+                Error($"expected 'extern', 'fun', 'record', 'var', 'const', 'import', or 'export', got '{Current.Text}'");
                 return null;
             }
         }
 
         if (Eat(TokenKind.RBrace) is null) return null;
-        return new ModuleDecl(name.Text, externs, funs, vars, records, imports, exports);
+        return new ModuleDecl(name.Text, externs, funs, vars, records, imports, exports, consts);
     }
 
     // ── Attributes ─────────────────────────────────────────────────────────────
@@ -240,6 +247,21 @@ class Parser(List<Token> tokens)
         }
         if (Eat(TokenKind.Semicolon) is null) return null;
         return new ModuleVarDecl(name.Text, type, init);
+    }
+
+    ModuleConstDecl? ParseModuleConstDecl()
+    {
+        if (Eat(TokenKind.Const) is null) return null;
+        var name = Eat(TokenKind.Ident);
+        if (name is null) return null;
+        if (Eat(TokenKind.Colon) is null) return null;
+        var type = ParseType();
+        if (type is null) return null;
+        if (Eat(TokenKind.Eq) is null) return null;
+        var init = ParseExpr();
+        if (init is null) return null;
+        if (Eat(TokenKind.Semicolon) is null) return null;
+        return new ModuleConstDecl(name.Text, type, init);
     }
 
     ImportDecl? ParseImportDecl()
