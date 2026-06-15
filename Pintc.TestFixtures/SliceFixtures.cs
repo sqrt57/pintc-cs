@@ -775,6 +775,90 @@ public static class SliceFixtures
         }
         """;
 
+    public const string Slice15Source = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            fun divrem(a: u32, b: u32) -> (u32, u32) {
+                return a / b, a % b;
+            }
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var (q: u32, r: u32) = divrem(10, 3);
+                if (q != 3) { exit_process(1); }
+                if (r != 1) { exit_process(2); }
+
+                var (q2: u32, r2: u32) = divrem(7, 2);
+                if (q2 != 3) { exit_process(3); }
+                if (r2 != 1) { exit_process(4); }
+
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice15DiscardSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            fun divrem(a: u32, b: u32) -> (u32, u32) {
+                return a / b, a % b;
+            }
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var (q: u32, _) = divrem(17, 5);
+                if (q != 3) { exit_process(1); }
+
+                var (_, r: u32) = divrem(17, 5);
+                if (r != 2) { exit_process(2); }
+
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice15MultiAssignSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            fun minmax(a: u32, b: u32) -> (u32, u32) {
+                if (a < b) {
+                    return a, b;
+                }
+                return b, a;
+            }
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var lo: u32;
+                var hi: u32;
+                (lo, hi) = minmax(7, 3);
+                if (lo != 3) { exit_process(1); }
+                if (hi != 7) { exit_process(2); }
+
+                (lo, hi) = minmax(2, 9);
+                if (lo != 2) { exit_process(3); }
+                if (hi != 9) { exit_process(4); }
+
+                exit_process(0);
+            }
+        }
+        """;
+
     // Demonstrates the re-evaluation bug: const initializer is a call whose side
     // effect is visible through a pointer. With the bug the call runs once per use
     // (a=1, b=2). With the fix it runs once at the declaration (a=1, b=1).

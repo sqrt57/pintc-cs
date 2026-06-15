@@ -210,7 +210,7 @@ class Parser(List<Token> tokens)
         var parms = ParseParamList();
         if (parms is null) return null;
         if (Eat(TokenKind.Arrow) is null) return null;
-        var ret = ParseType();
+        var ret = ParseReturnType();
         if (ret is null) return null;
         if (Eat(TokenKind.Semicolon) is null) return null;
         return new ExternFunDecl(attrs, name.Text, parms, ret);
@@ -224,7 +224,7 @@ class Parser(List<Token> tokens)
         var parms = ParseParamList();
         if (parms is null) return null;
         if (Eat(TokenKind.Arrow) is null) return null;
-        var ret = ParseType();
+        var ret = ParseReturnType();
         if (ret is null) return null;
         var body = ParseBlock();
         if (body is null) return null;
@@ -363,11 +363,45 @@ class Parser(List<Token> tokens)
     ReturnStmt? ParseReturnStmt()
     {
         if (Eat(TokenKind.Return) is null) return null;
-        if (TryEat(TokenKind.Semicolon)) return new ReturnStmt(null);
-        var expr = ParseExpr();
-        if (expr is null) return null;
+        if (TryEat(TokenKind.Semicolon)) return new ReturnStmt([]);
+        var values = new List<Expr>();
+        var first = ParseExpr();
+        if (first is null) return null;
+        values.Add(first);
+        while (TryEat(TokenKind.Comma))
+        {
+            var next = ParseExpr();
+            if (next is null) return null;
+            values.Add(next);
+        }
         if (Eat(TokenKind.Semicolon) is null) return null;
-        return new ReturnStmt(expr);
+        return new ReturnStmt(values);
+    }
+
+    // Parses a function return type: "()" | "(" T1 "," T2 ... ")" | Type
+    string? ParseReturnType()
+    {
+        if (!Check(TokenKind.LParen)) return ParseType();
+        Advance(); // consume '('
+        if (TryEat(TokenKind.RParen)) return "()";
+
+        // Multi-return: (T1, T2, ...) — optional "name:" prefix on each item (named returns)
+        var types = new List<string>();
+        do
+        {
+            // Skip optional "name:" — only when an identifier is immediately followed by ':'
+            if (Check(TokenKind.Ident) && Peek().Kind == TokenKind.Colon)
+            {
+                Advance(); // name
+                Advance(); // ':'
+            }
+            var t = ParseType();
+            if (t is null) return null;
+            types.Add(t);
+        } while (TryEat(TokenKind.Comma));
+
+        if (Eat(TokenKind.RParen) is null) return null;
+        return "(" + string.Join(",", types) + ")";
     }
 
     CallExpr? ParseCallArgs(string? qualifier, string name)
@@ -390,7 +424,13 @@ class Parser(List<Token> tokens)
         if (Check(TokenKind.Return))
             return ParseReturnStmt();
         if (Check(TokenKind.Var))
+        {
+            if (Peek().Kind == TokenKind.LParen)
+                return ParseMultiVarDecl();
             return ParseLocalVarDecl();
+        }
+        if (Check(TokenKind.LParen))
+            return ParseMultiAssignStmt();
         if (Check(TokenKind.If))
             return ParseIfStmt();
         if (Check(TokenKind.For))
@@ -634,6 +674,74 @@ class Parser(List<Token> tokens)
         }
         if (Eat(TokenKind.Semicolon) is null) return null;
         return new LocalVarDecl(name.Text, type, init);
+    }
+
+    // var (a: T, _) = call();
+    Stmt? ParseMultiVarDecl()
+    {
+        if (Eat(TokenKind.Var) is null) return null;
+        if (Eat(TokenKind.LParen) is null) return null;
+        var items = new List<(string? Name, string? TypeName)>();
+        do
+        {
+            if (Check(TokenKind.Ident) && Current.Text == "_")
+            {
+                Advance();
+                items.Add((null, null));
+            }
+            else
+            {
+                var iname = Eat(TokenKind.Ident);
+                if (iname is null) return null;
+                if (Eat(TokenKind.Colon) is null) return null;
+                var itype = ParseType();
+                if (itype is null) return null;
+                items.Add((iname.Text, itype));
+            }
+        } while (TryEat(TokenKind.Comma));
+        if (Eat(TokenKind.RParen) is null) return null;
+        if (Eat(TokenKind.Eq) is null) return null;
+        var rhs = ParseExpr();
+        if (rhs is null) return null;
+        if (rhs is not CallExpr callExpr)
+        {
+            Error("expected a function call on the right-hand side of multi-var declaration");
+            return null;
+        }
+        if (Eat(TokenKind.Semicolon) is null) return null;
+        return new MultiVarDecl(items, callExpr);
+    }
+
+    // (a, b) = call();
+    Stmt? ParseMultiAssignStmt()
+    {
+        if (Eat(TokenKind.LParen) is null) return null;
+        var names = new List<string?>();
+        do
+        {
+            if (Check(TokenKind.Ident) && Current.Text == "_")
+            {
+                Advance();
+                names.Add(null);
+            }
+            else
+            {
+                var n = Eat(TokenKind.Ident);
+                if (n is null) return null;
+                names.Add(n.Text);
+            }
+        } while (TryEat(TokenKind.Comma));
+        if (Eat(TokenKind.RParen) is null) return null;
+        if (Eat(TokenKind.Eq) is null) return null;
+        var rhs = ParseExpr();
+        if (rhs is null) return null;
+        if (rhs is not CallExpr callExpr)
+        {
+            Error("expected a function call on the right-hand side of multi-assign");
+            return null;
+        }
+        if (Eat(TokenKind.Semicolon) is null) return null;
+        return new MultiAssignStmt(names, callExpr);
     }
 
     CallStmt? ParseCallStmt()

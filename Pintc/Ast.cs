@@ -38,7 +38,7 @@ record StringConstExpr(uint RdataOffset, int ByteCount) : Expr;
 
 abstract record Stmt;
 record CallStmt(string Callee, List<Expr> Args) : Stmt;
-record ReturnStmt(Expr? Value) : Stmt;
+record ReturnStmt(List<Expr> Values) : Stmt;
 record LocalVarDecl(string Name, string TypeName, Expr? Init) : Stmt;
 record AssignStmt(string Name, Expr Value) : Stmt;
 record IndexAssignStmt(string ArrayName, Expr Idx, Expr Value) : Stmt;
@@ -52,6 +52,12 @@ record BreakStmt : Stmt;
 record ContinueStmt : Stmt;
 record ForStmt(string VarName, string VarTypeName, Expr VarInit, Expr Condition, string PostName, Expr PostValue, List<Stmt> Body) : Stmt;
 record LocalConstDecl(string Name, string TypeName, Expr Init) : Stmt;
+// var (a: T, _) = call(); — introduces new locals from a multi-return call.
+// Items: (Name=null, TypeName=null) for discard (_), (Name, TypeName) otherwise.
+record MultiVarDecl(List<(string? Name, string? TypeName)> Items, CallExpr Call) : Stmt;
+// (a, b) = call(); — positional assign into existing locals from a multi-return call.
+// Names: null for discard (_), variable name otherwise.
+record MultiAssignStmt(List<string?> Names, CallExpr Call) : Stmt;
 
 record RecordField(string Name, string TypeName);
 record RecordDecl(string Name, List<RecordField> Fields);

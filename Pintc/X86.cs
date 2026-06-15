@@ -94,6 +94,15 @@ static class X86
     public static byte[] PushEax() => [0x50];
     public static byte[] PushEdx() => [0x52];
 
+    // lea eax, [esp] — address of the current stack top (used to capture hidden-pointer address)
+    public static byte[] LeaEaxEsp() => [0x8D, 0x04, 0x24];
+
+    // mov ecx, [ebp+disp8] — load a frame slot into ECX (e.g. the hidden return pointer)
+    public static byte[] MovEcxEbpDisp8(sbyte disp) => [0x8B, 0x4D, (byte)disp];
+
+    // mov eax, [esp+disp8] — stack-relative load (reload saved hidden pointer after arg pushes)
+    public static byte[] MovEaxEspDisp8(byte disp) => [0x8B, 0x44, 0x24, disp];
+
     // Integer arithmetic (operands pre-loaded: left→EAX, right→ECX)
     public static byte[] AddEaxEcx()  => [0x03, 0xC1];
     public static byte[] SubEaxEcx()  => [0x2B, 0xC1];

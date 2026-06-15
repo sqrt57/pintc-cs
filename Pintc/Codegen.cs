@@ -20,7 +20,10 @@ record FunCtx(
     bool                                IsStdcall,     // true for [dll_export] functions (callee cleans up)
     int                                 ParamStackBytes,
     Dictionary<string, Expr>            Consts,
-    List<byte>                          RdataBytes);
+    List<byte>                          RdataBytes,
+    string                              ReturnType,    // this function's return type string
+    Dictionary<string, string>          FunReturnTypes, // funcName → returnType for all Pint funs
+    Dictionary<MultiVarDecl, int>       RetBufOffsets); // multi-var decl → buffer start EBP offset
 
 static class Codegen
 {
@@ -29,6 +32,13 @@ static class Codegen
 
     // Single-module overload: kept for backwards compat (CodegenTests, IntegrationTests).
     public static CodeUnit Emit(ModuleDecl module) => Emit([module]);
+
+    static bool IsMultiReturn(string returnType) =>
+        returnType.StartsWith('(') && returnType != "()";
+
+    // "(T1,T2)" → ["T1", "T2"]
+    static List<string> GetMultiReturnTypes(string returnType) =>
+        [.. returnType[1..^1].Split(',')];
 
     public static CodeUnit Emit(List<ModuleDecl> modules, bool isDll = false)
     {
@@ -57,6 +67,12 @@ static class Codegen
             m => (IReadOnlyDictionary<string, string>)
                   m.Imports.ToDictionary(i => i.Alias, i => i.ModuleName));
 
+        // Flat map of all Pint function return types (for multi-return call-site convention)
+        var funReturnTypes = new Dictionary<string, string>();
+        foreach (var mod in modules)
+            foreach (var fun in mod.Funs)
+                funReturnTypes[fun.Name] = fun.ReturnType;
+
         if (isDll)
         {
             // DLL mode: no [win32_entry] required; emit all functions in declaration order
@@ -65,7 +81,8 @@ static class Codegen
                 {
                     funOffsets[(mod.Name, fun.Name)] = code.Count;
                     EmitFun(fun, mod.Name, moduleAliases[mod.Name],
-                            importMap, varVas, recordMap, moduleConsts, code, iatRefs, imports, localCallRefs, rdataBytes);
+                            importMap, varVas, recordMap, moduleConsts, funReturnTypes,
+                            code, iatRefs, imports, localCallRefs, rdataBytes);
                 }
         }
         else
@@ -83,7 +100,8 @@ static class Codegen
 
             funOffsets[(entryModule.Name, entryFun.Name)] = code.Count;
             EmitFun(entryFun, entryModule.Name, moduleAliases[entryModule.Name],
-                    importMap, varVas, recordMap, moduleConsts, code, iatRefs, imports, localCallRefs, rdataBytes);
+                    importMap, varVas, recordMap, moduleConsts, funReturnTypes,
+                    code, iatRefs, imports, localCallRefs, rdataBytes);
 
             foreach (var mod in modules)
                 foreach (var fun in mod.Funs)
@@ -91,7 +109,8 @@ static class Codegen
                     if (fun == entryFun) continue;
                     funOffsets[(mod.Name, fun.Name)] = code.Count;
                     EmitFun(fun, mod.Name, moduleAliases[mod.Name],
-                            importMap, varVas, recordMap, moduleConsts, code, iatRefs, imports, localCallRefs, rdataBytes);
+                            importMap, varVas, recordMap, moduleConsts, funReturnTypes,
+                            code, iatRefs, imports, localCallRefs, rdataBytes);
                 }
         }
 
@@ -362,7 +381,8 @@ static class Codegen
         Dictionary<string, int> offsets,
         Dictionary<string, string> types,
         Dictionary<string, RecordDecl> recordMap,
-        ref int localBytes)
+        ref int localBytes,
+        Dictionary<MultiVarDecl, int> retBufOffsets)
     {
         foreach (var stmt in stmts)
         {
@@ -378,22 +398,41 @@ static class Codegen
                 offsets[lc.Name]  = -localBytes;
                 types[lc.Name]    = lc.TypeName;
             }
+            else if (stmt is MultiVarDecl mvd)
+            {
+                // Allocate all M slots (including discards) as a contiguous block.
+                // Item 0 is at the lowest address (bufStart); item i is at bufStart + i*4.
+                // The hidden pointer passed to the callee = address of bufStart.
+                int count = mvd.Items.Count;
+                localBytes += count * 4;
+                int bufStart = -localBytes;
+                for (int i = 0; i < count; i++)
+                {
+                    var (name, typeName) = mvd.Items[i];
+                    if (name is not null)
+                    {
+                        offsets[name] = bufStart + i * 4;
+                        types[name]   = typeName!;
+                    }
+                }
+                retBufOffsets[mvd] = bufStart;
+            }
             else if (stmt is IfStmt ifStmt)
             {
-                CollectLocals(ifStmt.Then, offsets, types, recordMap, ref localBytes);
+                CollectLocals(ifStmt.Then, offsets, types, recordMap, ref localBytes, retBufOffsets);
                 if (ifStmt.Else is not null)
-                    CollectLocals(ifStmt.Else, offsets, types, recordMap, ref localBytes);
+                    CollectLocals(ifStmt.Else, offsets, types, recordMap, ref localBytes, retBufOffsets);
             }
             else if (stmt is WhileStmt whileStmt)
-                CollectLocals(whileStmt.Body, offsets, types, recordMap, ref localBytes);
+                CollectLocals(whileStmt.Body, offsets, types, recordMap, ref localBytes, retBufOffsets);
             else if (stmt is LoopStmt loopStmt)
-                CollectLocals(loopStmt.Body, offsets, types, recordMap, ref localBytes);
+                CollectLocals(loopStmt.Body, offsets, types, recordMap, ref localBytes, retBufOffsets);
             else if (stmt is ForStmt forStmt)
             {
                 localBytes                   += StackSlotSize(forStmt.VarTypeName, recordMap);
                 offsets[forStmt.VarName]      = -localBytes;
                 types[forStmt.VarName]        = forStmt.VarTypeName;
-                CollectLocals(forStmt.Body, offsets, types, recordMap, ref localBytes);
+                CollectLocals(forStmt.Body, offsets, types, recordMap, ref localBytes, retBufOffsets);
             }
         }
     }
@@ -406,29 +445,38 @@ static class Codegen
         Dictionary<string, uint> varVas,
         Dictionary<string, RecordDecl> recordMap,
         Dictionary<string, Expr> moduleConsts,
+        Dictionary<string, string> funReturnTypes,
         List<byte> code,
         List<IatRef> iatRefs,
         List<ImportSpec> imports,
         List<LocalCallRef> localCallRefs,
         List<byte> rdataBytes)
     {
+        bool isMultiReturn   = IsMultiReturn(fun.ReturnType);
         bool isEntryPoint    = fun.Attributes.Any(a => a.Name == "win32_entry");
         bool isNoReturn      = fun.Attributes.Any(a => a.Name == "noreturn");
         bool isDllExport     = fun.Attributes.Any(a => a.Name == "dll_export");
         bool isStdcall       = isDllExport;
-        int  paramStackBytes = isStdcall ? fun.Params.Count * 4 : 0;
 
-        var offsets    = new Dictionary<string, int>();
-        var types      = new Dictionary<string, string>();
-        int localBytes = 0;
-        CollectLocals(fun.Body, offsets, types, recordMap, ref localBytes);
+        var offsets       = new Dictionary<string, int>();
+        var types         = new Dictionary<string, string>();
+        int localBytes    = 0;
+        var retBufOffsets = new Dictionary<MultiVarDecl, int>();
+        CollectLocals(fun.Body, offsets, types, recordMap, ref localBytes, retBufOffsets);
 
-        // Parameters: positive EBP offsets ([ebp+8] = first param after saved EBP + ret addr)
+        // Parameters: positive EBP offsets.
+        // For multi-return functions the hidden pointer occupies [EBP+8]; user params start at [EBP+12].
+        int paramBase = isMultiReturn ? 12 : 8;
         for (int i = 0; i < fun.Params.Count; i++)
         {
-            offsets[fun.Params[i].Name] = 8 + i * 4;
+            offsets[fun.Params[i].Name] = paramBase + i * 4;
             types[fun.Params[i].Name]   = fun.Params[i].TypeName;
         }
+
+        // stdcall cleanup size includes the hidden pointer slot when applicable.
+        int paramStackBytes = isStdcall
+            ? ((isMultiReturn ? 1 : 0) + fun.Params.Count) * 4
+            : 0;
 
         bool needsFrame = !isEntryPoint || localBytes > 0;
         if (needsFrame)
@@ -443,7 +491,8 @@ static class Codegen
                              code, iatRefs, imports,
                              moduleName, aliasMap, localCallRefs,
                              localBytes, needsFrame, isStdcall, paramStackBytes,
-                             new Dictionary<string, Expr>(moduleConsts), rdataBytes);
+                             new Dictionary<string, Expr>(moduleConsts), rdataBytes,
+                             fun.ReturnType, funReturnTypes, retBufOffsets);
 
         EmitStmts(fun.Body, ctx);
 
@@ -509,6 +558,12 @@ static class Codegen
                     break;
                 case ReturnStmt ret:
                     EmitReturnStmt(ret, ctx);
+                    break;
+                case MultiVarDecl mvd:
+                    EmitMultiVarDecl(mvd, ctx);
+                    break;
+                case MultiAssignStmt mas:
+                    EmitMultiAssignStmt(mas, ctx);
                     break;
                 case IfStmt ifStmt:
                     EmitIfStmt(ifStmt, ctx, breakPatches, continuePatches);
@@ -709,9 +764,24 @@ static class Codegen
 
     static void EmitReturnStmt(ReturnStmt stmt, FunCtx ctx)
     {
-        if (stmt.Value is not null)
+        if (IsMultiReturn(ctx.ReturnType) && stmt.Values.Count > 0)
         {
-            EmitExpr(stmt.Value, ctx);
+            // Write each return value through the hidden pointer at [EBP+8].
+            // Reload ECX from [EBP+8] before each write so expression evaluation can't corrupt it.
+            for (int i = 0; i < stmt.Values.Count; i++)
+            {
+                EmitExpr(stmt.Values[i], ctx);
+                ctx.Code.AddRange(X86.PopEax());
+                ctx.Code.AddRange(X86.MovEcxEbpDisp8(8)); // mov ecx, [ebp+8]
+                if (i == 0)
+                    ctx.Code.AddRange(X86.MovMemEcxEax());
+                else
+                    ctx.Code.AddRange(X86.MovMemEcxDisp8Eax((sbyte)(i * 4)));
+            }
+        }
+        else if (stmt.Values.Count == 1)
+        {
+            EmitExpr(stmt.Values[0], ctx);
             ctx.Code.AddRange(X86.PopEax());
         }
         if (ctx.NeedsFrame)
@@ -722,6 +792,81 @@ static class Codegen
         ctx.Code.AddRange(ctx.IsStdcall && ctx.ParamStackBytes > 0
             ? X86.RetN((ushort)ctx.ParamStackBytes)
             : X86.Ret());
+    }
+
+    // Caller side for: var (a: T, b: T) = call();
+    // Return buffer is pre-allocated as a contiguous block in the caller's frame.
+    // Stack protocol:
+    //   1. LEA EAX, [EBP + bufStart]   — hidden ptr = address of return buffer in frame
+    //   2. PUSH EAX                     — save hidden ptr before arg evaluation clobbers it
+    //   3. Push user args R-L
+    //   4. MOV EAX, [ESP + N*4]         — reload hidden ptr from its saved slot
+    //   5. PUSH EAX                     — push as first "arg" (callee sees it at EBP+8)
+    //   6. CALL rel32
+    //   7. ADD ESP, (1 + N + 1) * 4    — clean up: hidden ptr + N user args + hidden ptr save
+    //   Return values are now in their pre-allocated frame slots — no extra pops needed.
+    static void EmitMultiVarDecl(MultiVarDecl stmt, FunCtx ctx)
+    {
+        int numUserArgs = stmt.Call.Args.Count;
+        int bufStart    = ctx.RetBufOffsets[stmt];
+
+        ctx.Code.AddRange(X86.LeaEaxEbpDisp8((sbyte)bufStart)); // hidden ptr
+        ctx.Code.AddRange(X86.PushEax());                        // save it
+
+        for (int i = numUserArgs - 1; i >= 0; i--)              // push user args R-L
+            EmitExpr(stmt.Call.Args[i], ctx);
+
+        ctx.Code.AddRange(X86.MovEaxEspDisp8((byte)(numUserArgs * 4))); // reload hidden ptr
+        ctx.Code.AddRange(X86.PushEax());                                // push as callee arg
+
+        string targetModule = ctx.ModuleName;
+        if (stmt.Call.Qualifier is not null &&
+            !ctx.AliasMap.TryGetValue(stmt.Call.Qualifier, out targetModule!))
+            throw new InvalidOperationException($"Unknown import alias '{stmt.Call.Qualifier}'");
+
+        ctx.Code.AddRange(X86.CallRel32());
+        ctx.LocalCallRefs.Add(new LocalCallRef(ctx.Code.Count - 4, targetModule, stmt.Call.Name));
+
+        ctx.Code.AddRange(X86.AddEspImm8((byte)((1 + numUserArgs + 1) * 4)));
+    }
+
+    // Caller side for: (lo, hi) = call();
+    // No pre-allocated buffer — allocate a temporary buffer dynamically on the stack,
+    // then pop each return value into its existing local slot.
+    static void EmitMultiAssignStmt(MultiAssignStmt stmt, FunCtx ctx)
+    {
+        int numRetVals  = stmt.Names.Count;
+        int numUserArgs = stmt.Call.Args.Count;
+
+        ctx.Code.AddRange(X86.SubEspImm8((byte)(numRetVals * 4))); // allocate temp buffer
+        ctx.Code.AddRange(X86.LeaEaxEsp());                        // hidden ptr = ESP
+        ctx.Code.AddRange(X86.PushEax());                          // save it
+
+        for (int i = numUserArgs - 1; i >= 0; i--)                // push user args R-L
+            EmitExpr(stmt.Call.Args[i], ctx);
+
+        ctx.Code.AddRange(X86.MovEaxEspDisp8((byte)(numUserArgs * 4))); // reload hidden ptr
+        ctx.Code.AddRange(X86.PushEax());                                // push as callee arg
+
+        string targetModule = ctx.ModuleName;
+        if (stmt.Call.Qualifier is not null &&
+            !ctx.AliasMap.TryGetValue(stmt.Call.Qualifier, out targetModule!))
+            throw new InvalidOperationException($"Unknown import alias '{stmt.Call.Qualifier}'");
+
+        ctx.Code.AddRange(X86.CallRel32());
+        ctx.LocalCallRefs.Add(new LocalCallRef(ctx.Code.Count - 4, targetModule, stmt.Call.Name));
+
+        ctx.Code.AddRange(X86.AddEspImm8((byte)((1 + numUserArgs) * 4))); // hidden ptr + user args
+        ctx.Code.AddRange(X86.AddEspImm8(4));                              // hidden ptr save
+
+        // Return buffer is now on top of the stack; pop into target locals (or skip discards).
+        for (int i = 0; i < stmt.Names.Count; i++)
+        {
+            if (stmt.Names[i] is string name)
+                ctx.Code.AddRange(X86.PopToEbpDisp8((sbyte)ctx.Offsets[name]));
+            else
+                ctx.Code.AddRange(X86.AddEspImm8(4));
+        }
     }
 
     static void EmitCallExpr(CallExpr callExpr, FunCtx ctx)
