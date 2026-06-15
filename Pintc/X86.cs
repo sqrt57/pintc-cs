@@ -68,6 +68,9 @@ static class X86
     // mov eax, [eax] — dereference: load 32-bit value at address in EAX
     public static byte[] MovEaxMemEax() => [0x8B, 0x00];
 
+    // mov al, [eax] — load byte from address in EAX into AL
+    public static byte[] MovAlMemEax() => [0x8A, 0x00];
+
     // mov eax, [eax + disp8] — load from pointer + byte offset (field access through pointer)
     public static byte[] MovEaxMemEaxDisp8(sbyte disp) => [0x8B, 0x40, (byte)disp];
 

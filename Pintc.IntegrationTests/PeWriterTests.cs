@@ -22,6 +22,7 @@ public class PeWriterTests : IDisposable
         IatRefs      = [new IatRef(CodeOffset: 4, ExitProcess)],
         Imports      = [ExitProcess],
         Data         = [],
+        ReadOnly     = [],
         ExportedFuns = [],
     };
 
@@ -33,6 +34,7 @@ public class PeWriterTests : IDisposable
         IatRefs      = [new IatRef(CodeOffset: 8, ExitProcess)],
         Imports      = [ExitProcess],
         Data         = [5, 0, 0, 0],
+        ReadOnly     = [],
         ExportedFuns = [],
     };
 

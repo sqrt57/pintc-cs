@@ -32,6 +32,9 @@ record FieldAccessExpr(string VarName, List<string> Path) : Expr;
 record AddressOfExpr(Expr Operand) : Expr;
 record DerefExpr(Expr Ptr) : Expr;
 record ArrowExpr(Expr Ptr, string Field) : Expr;
+record CharLiteralExpr(byte Value) : Expr;
+record StringLiteralExpr(byte[] Bytes) : Expr;
+record StringConstExpr(uint RdataOffset, int ByteCount) : Expr;
 
 abstract record Stmt;
 record CallStmt(string Callee, List<Expr> Args) : Stmt;

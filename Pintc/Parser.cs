@@ -857,6 +857,18 @@ class Parser(List<Token> tokens)
             return new IntLiteralExpr(value);
         }
 
+        if (Check(TokenKind.StringLit))
+        {
+            var tok = Advance();
+            return new StringLiteralExpr(DecodeStringLit(tok.Text));
+        }
+
+        if (Check(TokenKind.CharLit))
+        {
+            var tok = Advance();
+            return new CharLiteralExpr(DecodeCharLit(tok.Text));
+        }
+
         if (Check(TokenKind.True))  { Advance(); return new BoolLiteralExpr(true);  }
         if (Check(TokenKind.False)) { Advance(); return new BoolLiteralExpr(false); }
 
@@ -924,6 +936,70 @@ class Parser(List<Token> tokens)
         Error($"expected expression, got '{Current.Text}'");
         return null;
     }
+
+    static byte[] DecodeStringLit(string raw)
+    {
+        // raw includes surrounding double quotes: "..."
+        var bytes = new List<byte>();
+        int i   = 1;
+        int end = raw.Length - 1;
+        while (i < end)
+        {
+            char c = raw[i];
+            if (c == '\\')
+            {
+                i++;
+                if (i >= end) break;
+                char esc = raw[i];
+                if (esc == 'u' && i + 1 < end && raw[i + 1] == '{')
+                {
+                    i += 2;
+                    int hexStart = i;
+                    while (i < end && raw[i] != '}') i++;
+                    int codepoint = Convert.ToInt32(raw[hexStart..i], 16);
+                    bytes.AddRange(System.Text.Encoding.UTF8.GetBytes(char.ConvertFromUtf32(codepoint)));
+                    if (i < end) i++;
+                }
+                else
+                {
+                    bytes.Add(DecodeEscapeChar(esc));
+                    i++;
+                }
+            }
+            else if (char.IsHighSurrogate(c) && i + 1 < end && char.IsLowSurrogate(raw[i + 1]))
+            {
+                bytes.AddRange(System.Text.Encoding.UTF8.GetBytes(new string([c, raw[i + 1]])));
+                i += 2;
+            }
+            else
+            {
+                bytes.AddRange(System.Text.Encoding.UTF8.GetBytes(c.ToString()));
+                i++;
+            }
+        }
+        return [.. bytes];
+    }
+
+    static byte DecodeCharLit(string raw)
+    {
+        // raw includes surrounding single quotes: '.'
+        int i = 1;
+        if (raw[i] == '\\')
+            return DecodeEscapeChar(raw[i + 1]);
+        return (byte)raw[i];
+    }
+
+    static byte DecodeEscapeChar(char c) => c switch
+    {
+        'n'  => 10,
+        'r'  => 13,
+        't'  => 9,
+        '\\' => 92,
+        '"'  => 34,
+        '\'' => 39,
+        '0'  => 0,
+        _    => (byte)c,
+    };
 
     static bool TryParseIntLit(string text, out long value)
     {

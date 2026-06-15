@@ -16,5 +16,6 @@ class CodeUnit
     public required List<IatRef>        IatRefs      { get; init; }
     public required List<ImportSpec>    Imports      { get; init; }
     public required byte[]              Data         { get; init; }  // .data section bytes; empty = no .data section
+    public required byte[]              ReadOnly     { get; init; }  // .rdata section; empty = no section
     public required List<ExportedFun>   ExportedFuns { get; init; }  // DLL exports; empty for EXE output
 }

@@ -19,12 +19,13 @@ record FunCtx(
     bool                                NeedsFrame,
     bool                                IsStdcall,     // true for [dll_export] functions (callee cleans up)
     int                                 ParamStackBytes,
-    Dictionary<string, Expr>            Consts);
+    Dictionary<string, Expr>            Consts,
+    List<byte>                          RdataBytes);
 
 static class Codegen
 {
     const uint ImageBase = 0x00400000u;
-    const uint DataRva   = 0x00002000u;
+    const uint RdataRva  = 0x00002000u;
 
     // Single-module overload: kept for backwards compat (CodegenTests, IntegrationTests).
     public static CodeUnit Emit(ModuleDecl module) => Emit([module]);
@@ -37,9 +38,12 @@ static class Codegen
         var allConsts  = modules.SelectMany(m => m.Consts).ToList();
 
         var importMap    = BuildImportMap(allExterns);
-        var (varVas, dataBytes) = BuildDataSection(allVars);
         var recordMap    = BuildRecordMap(allRecords);
-        var moduleConsts = BuildModuleConstMap(allConsts);
+        var rdataBytes   = new List<byte>();
+        var moduleConsts = BuildModuleConstMap(allConsts, rdataBytes);
+        bool hasRdata    = rdataBytes.Count > 0;
+        uint dataRva     = hasRdata ? RdataRva + 0x1000u : RdataRva;
+        var (varVas, dataBytes) = BuildDataSection(allVars, dataRva);
 
         var code          = new List<byte>();
         var iatRefs       = new List<IatRef>();
@@ -61,7 +65,7 @@ static class Codegen
                 {
                     funOffsets[(mod.Name, fun.Name)] = code.Count;
                     EmitFun(fun, mod.Name, moduleAliases[mod.Name],
-                            importMap, varVas, recordMap, moduleConsts, code, iatRefs, imports, localCallRefs);
+                            importMap, varVas, recordMap, moduleConsts, code, iatRefs, imports, localCallRefs, rdataBytes);
                 }
         }
         else
@@ -79,7 +83,7 @@ static class Codegen
 
             funOffsets[(entryModule.Name, entryFun.Name)] = code.Count;
             EmitFun(entryFun, entryModule.Name, moduleAliases[entryModule.Name],
-                    importMap, varVas, recordMap, moduleConsts, code, iatRefs, imports, localCallRefs);
+                    importMap, varVas, recordMap, moduleConsts, code, iatRefs, imports, localCallRefs, rdataBytes);
 
             foreach (var mod in modules)
                 foreach (var fun in mod.Funs)
@@ -87,7 +91,7 @@ static class Codegen
                     if (fun == entryFun) continue;
                     funOffsets[(mod.Name, fun.Name)] = code.Count;
                     EmitFun(fun, mod.Name, moduleAliases[mod.Name],
-                            importMap, varVas, recordMap, moduleConsts, code, iatRefs, imports, localCallRefs);
+                            importMap, varVas, recordMap, moduleConsts, code, iatRefs, imports, localCallRefs, rdataBytes);
                 }
         }
 
@@ -118,6 +122,7 @@ static class Codegen
             IatRefs      = iatRefs,
             Imports      = imports,
             Data         = [.. dataBytes],
+            ReadOnly     = [.. rdataBytes],
             ExportedFuns = exportedFuns,
         };
     }
@@ -136,13 +141,13 @@ static class Codegen
         return map;
     }
 
-    static (Dictionary<string, uint> VarVas, List<byte> Data) BuildDataSection(List<ModuleVarDecl> vars)
+    static (Dictionary<string, uint> VarVas, List<byte> Data) BuildDataSection(List<ModuleVarDecl> vars, uint dataRva)
     {
         var varVas = new Dictionary<string, uint>();
         var data   = new List<byte>();
         foreach (var v in vars)
         {
-            varVas[v.Name] = ImageBase + DataRva + (uint)data.Count;
+            varVas[v.Name] = ImageBase + dataRva + (uint)data.Count;
             int  size     = TypeSize(v.TypeName);
             long initVal  = v.Init is IntLiteralExpr e ? e.Value : 0L;
             for (int i = 0; i < size; i++)
@@ -183,8 +188,19 @@ static class Codegen
         _ => throw new NotSupportedException($"No known size for type '{typeName}'")
     };
 
-    static string? GetExprType(Expr expr, Dictionary<string, string> types) =>
-        expr is VarRefExpr v && types.TryGetValue(v.Name, out var t) ? t : null;
+    static int Stride(string typeName, Dictionary<string, RecordDecl> recordMap) => typeName switch
+    {
+        "u8" or "i8" or "byte" or "bool" => 1,
+        "u16" or "i16" => 2,
+        _ => StackSlotSize(typeName, recordMap),
+    };
+
+    static string? GetExprType(Expr expr, Dictionary<string, string> types) => expr switch
+    {
+        VarRefExpr v when types.TryGetValue(v.Name, out var t) => t,
+        BinaryExpr { Op: BinaryOp.Add or BinaryOp.Sub } b => GetExprType(b.Left, types),
+        _ => null,
+    };
 
     static int ResolveRecordFieldByteOffset(
         string recordTypeName,
@@ -226,46 +242,55 @@ static class Codegen
         return offset;
     }
 
-    static bool IsLiteralExpr(Expr expr) => expr is IntLiteralExpr or BoolLiteralExpr;
+    static bool IsLiteralExpr(Expr expr) => expr is IntLiteralExpr or BoolLiteralExpr or StringLiteralExpr;
 
-    static Dictionary<string, Expr> BuildModuleConstMap(List<ModuleConstDecl> consts)
+    static Dictionary<string, Expr> BuildModuleConstMap(List<ModuleConstDecl> consts, List<byte> rdataBytes)
     {
         var resolved   = new Dictionary<string, Expr>();
         var constInits = consts.ToDictionary(c => c.Name, c => c.Init);
         foreach (var c in consts)
-            ResolveModuleConst(c.Name, constInits, resolved);
+            ResolveModuleConst(c.Name, constInits, resolved, rdataBytes);
         return resolved;
     }
 
     static void ResolveModuleConst(
         string name,
         Dictionary<string, Expr> constInits,
-        Dictionary<string, Expr> resolved)
+        Dictionary<string, Expr> resolved,
+        List<byte> rdataBytes)
     {
         if (resolved.ContainsKey(name)) return;
         if (!constInits.TryGetValue(name, out var init))
             throw new InvalidOperationException($"Undefined module const '{name}'");
-        resolved[name] = EvalConstExpr(init, constInits, resolved);
+        resolved[name] = EvalConstExpr(init, constInits, resolved, rdataBytes);
     }
 
     static Expr EvalConstExpr(
         Expr expr,
         Dictionary<string, Expr> constInits,
-        Dictionary<string, Expr> resolved)
+        Dictionary<string, Expr> resolved,
+        List<byte> rdataBytes)
     {
         switch (expr)
         {
             case IntLiteralExpr or BoolLiteralExpr:
                 return expr;
+            case StringLiteralExpr s:
+            {
+                uint offset = (uint)rdataBytes.Count;
+                rdataBytes.AddRange(s.Bytes);
+                rdataBytes.Add(0);
+                return new StringConstExpr(offset, s.Bytes.Length);
+            }
             case VarRefExpr v:
-                ResolveModuleConst(v.Name, constInits, resolved);
+                ResolveModuleConst(v.Name, constInits, resolved, rdataBytes);
                 return resolved[v.Name];
             case UnaryExpr u:
-                return EvalConstUnary(u.Op, EvalConstExpr(u.Operand, constInits, resolved));
+                return EvalConstUnary(u.Op, EvalConstExpr(u.Operand, constInits, resolved, rdataBytes));
             case BinaryExpr b:
                 return EvalConstBinary(b.Op,
-                    EvalConstExpr(b.Left,  constInits, resolved),
-                    EvalConstExpr(b.Right, constInits, resolved));
+                    EvalConstExpr(b.Left,  constInits, resolved, rdataBytes),
+                    EvalConstExpr(b.Right, constInits, resolved, rdataBytes));
             default:
                 throw new InvalidOperationException(
                     $"Non-constant expression in module const initializer: {expr.GetType().Name}");
@@ -384,7 +409,8 @@ static class Codegen
         List<byte> code,
         List<IatRef> iatRefs,
         List<ImportSpec> imports,
-        List<LocalCallRef> localCallRefs)
+        List<LocalCallRef> localCallRefs,
+        List<byte> rdataBytes)
     {
         bool isEntryPoint    = fun.Attributes.Any(a => a.Name == "win32_entry");
         bool isNoReturn      = fun.Attributes.Any(a => a.Name == "noreturn");
@@ -417,7 +443,7 @@ static class Codegen
                              code, iatRefs, imports,
                              moduleName, aliasMap, localCallRefs,
                              localBytes, needsFrame, isStdcall, paramStackBytes,
-                             new Dictionary<string, Expr>(moduleConsts));
+                             new Dictionary<string, Expr>(moduleConsts), rdataBytes);
 
         EmitStmts(fun.Body, ctx);
 
@@ -445,7 +471,14 @@ static class Codegen
             switch (stmt)
             {
                 case LocalConstDecl lc:
-                    if (IsLiteralExpr(lc.Init))
+                    if (lc.Init is StringLiteralExpr ls)
+                    {
+                        uint rdataOffset = (uint)ctx.RdataBytes.Count;
+                        ctx.RdataBytes.AddRange(ls.Bytes);
+                        ctx.RdataBytes.Add(0);
+                        ctx.Consts[lc.Name] = new StringConstExpr(rdataOffset, ls.Bytes.Length);
+                    }
+                    else if (IsLiteralExpr(lc.Init))
                         ctx.Consts[lc.Name] = lc.Init;
                     else
                     {
@@ -748,6 +781,9 @@ static class Codegen
             case BoolLiteralExpr { Value: false }:
                 ctx.Code.AddRange(X86.PushImm8(0));
                 break;
+            case CharLiteralExpr ch:
+                ctx.Code.AddRange(X86.PushImm8(ch.Value));
+                break;
             case VarRefExpr v when ctx.Consts.TryGetValue(v.Name, out var constExpr):
                 EmitExpr(constExpr, ctx);
                 break;
@@ -759,6 +795,14 @@ static class Codegen
                 break;
             case VarRefExpr v:
                 throw new InvalidOperationException($"Undefined variable '{v.Name}'");
+            case FieldAccessExpr fa when ctx.Consts.TryGetValue(fa.VarName, out var constVal) && constVal is StringConstExpr sc:
+                if (fa.Path.Count == 1 && fa.Path[0] == "ptr")
+                    ctx.Code.AddRange(X86.PushImm32(ImageBase + RdataRva + sc.RdataOffset));
+                else if (fa.Path.Count == 1 && fa.Path[0] == "len")
+                    ctx.Code.AddRange(X86.PushImm32((uint)sc.ByteCount));
+                else
+                    throw new InvalidOperationException($"Unknown string field '{string.Join(".", fa.Path)}' on '{fa.VarName}'");
+                break;
             case FieldAccessExpr fa:
                 int fieldOffset = ResolveFieldByteOffset(fa.VarName, fa.Path, ctx.Types, ctx.RecordMap);
                 ctx.Code.AddRange(X86.PushEbpDisp8((sbyte)(ctx.Offsets[fa.VarName] + fieldOffset)));
@@ -773,11 +817,20 @@ static class Codegen
                 EmitAddressOfExpr(ao, ctx);
                 break;
             case DerefExpr deref:
+            {
                 EmitExpr(deref.Ptr, ctx);
                 ctx.Code.AddRange(X86.PopEax());
-                ctx.Code.AddRange(X86.MovEaxMemEax());
+                var ptrType = GetExprType(deref.Ptr, ctx.Types);
+                if (ptrType is not null && ptrType.StartsWith('^') && Stride(ptrType[1..], ctx.RecordMap) == 1)
+                {
+                    ctx.Code.AddRange(X86.MovAlMemEax());
+                    ctx.Code.AddRange(X86.MovzxEaxAl());
+                }
+                else
+                    ctx.Code.AddRange(X86.MovEaxMemEax());
                 ctx.Code.AddRange(X86.PushEax());
                 break;
+            }
             case ArrowExpr arrow: {
                 var arrowPtrType = GetExprType(arrow.Ptr, ctx.Types)
                     ?? throw new InvalidOperationException("Cannot determine pointer type for arrow expression");
@@ -814,7 +867,7 @@ static class Codegen
                 ctx.Code.AddRange(X86.PopEax()); // left
                 if (leftType is not null && leftType.StartsWith('^'))
                 {
-                    int stride = StackSlotSize(leftType[1..], ctx.RecordMap);
+                    int stride = Stride(leftType[1..], ctx.RecordMap);
                     if (stride != 1) ctx.Code.AddRange(X86.ImulEcxImm8((byte)stride));
                     ctx.Code.AddRange(b.Op == BinaryOp.Add ? X86.AddEaxEcx() : X86.SubEaxEcx());
                     ctx.Code.AddRange(X86.PushEax());

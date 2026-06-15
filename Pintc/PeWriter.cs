@@ -12,9 +12,6 @@ static class PeWriter
     const uint FileAlign = 0x0200u;
     const uint HdrSize   = 0x0200u;  // SizeOfHeaders, file-aligned
     const uint TextRva   = 0x1000u;
-    const uint DataRva   = 0x2000u;  // .data RVA when present; .idata shifts to 0x3000
-    const uint IdataRvaNoData  = 0x2000u;  // .idata when no .data section
-    const uint IdataRvaWithData = 0x3000u; // .idata when .data section present
 
     // Minimal IMAGE_DOS_HEADER (64 bytes). e_lfanew = 0x40: PE header follows immediately.
     static readonly byte[] DosHeader = [
@@ -30,28 +27,35 @@ static class PeWriter
 
     public static void Write(CodeUnit unit, Stream output)
     {
-        bool hasData = unit.Data.Length > 0;
-        uint idataRva = hasData ? IdataRvaWithData : IdataRvaNoData;
+        bool hasRdata = unit.ReadOnly.Length > 0;
+        bool hasData  = unit.Data.Length > 0;
+
+        const uint RdataBase = 0x2000u;
+        uint rdataRva = RdataBase;
+        uint dataRva  = rdataRva + (hasRdata ? SecAlign : 0u);
+        uint idataRva = dataRva  + (hasData  ? SecAlign : 0u);
 
         var idataBlob = BuildIdata(unit.Imports, idataRva, out var iatVas, out var idtSize);
 
-        // Patch IAT addresses into a copy of the code.
         var code = (byte[])unit.Code.Clone();
         foreach (var rel in unit.IatRefs)
             BitConverter.TryWriteBytes(code.AsSpan(rel.CodeOffset, 4), iatVas[rel.Import]);
 
         uint codeVirtSize  = (uint)code.Length;
+        uint rdataVirtSize = (uint)unit.ReadOnly.Length;
         uint dataVirtSize  = (uint)unit.Data.Length;
         uint idataVirtSize = (uint)idataBlob.Length;
         uint codeRawSize   = AlignUp(codeVirtSize,  FileAlign);
-        uint dataRawSize   = hasData ? AlignUp(dataVirtSize, FileAlign) : 0u;
+        uint rdataRawSize  = hasRdata ? AlignUp(rdataVirtSize, FileAlign) : 0u;
+        uint dataRawSize   = hasData  ? AlignUp(dataVirtSize,  FileAlign) : 0u;
         uint idataRawSize  = AlignUp(idataVirtSize, FileAlign);
         uint textFileOff   = HdrSize;
-        uint dataFileOff   = textFileOff + codeRawSize;
-        uint idataFileOff  = hasData ? dataFileOff + dataRawSize : textFileOff + codeRawSize;
+        uint rdataFileOff  = textFileOff  + codeRawSize;
+        uint dataFileOff   = rdataFileOff + (hasRdata ? rdataRawSize : 0u);
+        uint idataFileOff  = dataFileOff  + (hasData  ? dataRawSize  : 0u);
         uint sizeOfImage   = AlignUp(idataRva + idataVirtSize, SecAlign);
-        uint sizeOfInitData = (hasData ? dataRawSize : 0u) + idataRawSize;
-        ushort numSections = hasData ? (ushort)3 : (ushort)2;
+        uint sizeOfInitData = rdataRawSize + (hasData ? dataRawSize : 0u) + idataRawSize;
+        ushort numSections = (ushort)(2 + (hasRdata ? 1 : 0) + (hasData ? 1 : 0));
 
         using var bw = new BinaryWriter(output, Encoding.Latin1, leaveOpen: true);
 
@@ -123,20 +127,13 @@ static class PeWriter
         bw.Write((ushort)0);      // NumberOfLinenumbers
         bw.Write(0x60000020u);    // Characteristics: CNT_CODE | MEM_EXECUTE | MEM_READ
 
+        // .rdata (read-only strings, only when string literals present)
+        if (hasRdata)
+            WriteSectionHeader(bw, ".rdata\0\0", rdataVirtSize, rdataRva, rdataRawSize, rdataFileOff, 0x40000040u);
+
         // .data (only when vars are present)
         if (hasData)
-        {
-            bw.Write(Encoding.Latin1.GetBytes(".data\0\0\0")); // Name (8 bytes)
-            bw.Write(dataVirtSize);   // VirtualSize
-            bw.Write(DataRva);        // VirtualAddress
-            bw.Write(dataRawSize);    // SizeOfRawData
-            bw.Write(dataFileOff);    // PointerToRawData
-            bw.Write(0u);             // PointerToRelocations
-            bw.Write(0u);             // PointerToLinenumbers
-            bw.Write((ushort)0);      // NumberOfRelocations
-            bw.Write((ushort)0);      // NumberOfLinenumbers
-            bw.Write(0xC0000040u);    // Characteristics: CNT_INITIALIZED_DATA | MEM_READ | MEM_WRITE
-        }
+            WriteSectionHeader(bw, ".data\0\0\0", dataVirtSize, dataRva, dataRawSize, dataFileOff, 0xC0000040u);
 
         // .idata
         bw.Write(Encoding.Latin1.GetBytes(".idata\0\0")); // Name (8 bytes)
@@ -156,6 +153,13 @@ static class PeWriter
         // ── .text raw data ────────────────────────────────────────
         bw.Write(code);
         PadTo(bw, textFileOff + codeRawSize);
+
+        // ── .rdata raw data ───────────────────────────────────────
+        if (hasRdata)
+        {
+            bw.Write(unit.ReadOnly);
+            PadTo(bw, rdataFileOff + rdataRawSize);
+        }
 
         // ── .data raw data ────────────────────────────────────────
         if (hasData)
