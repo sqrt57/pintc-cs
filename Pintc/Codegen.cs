@@ -23,7 +23,8 @@ record FunCtx(
     List<byte>                          RdataBytes,
     string                              ReturnType,    // this function's return type string
     Dictionary<string, string>          FunReturnTypes, // funcName → returnType for all Pint funs
-    Dictionary<MultiVarDecl, int>       RetBufOffsets); // multi-var decl → buffer start EBP offset
+    Dictionary<MultiVarDecl, int>       RetBufOffsets,  // multi-var decl → buffer start EBP offset
+    Dictionary<string, List<Param>>     FunParamLists); // funcName → params, for named-arg reordering
 
 static class Codegen
 {
@@ -69,9 +70,13 @@ static class Codegen
 
         // Flat map of all Pint function return types (for multi-return call-site convention)
         var funReturnTypes = new Dictionary<string, string>();
+        var funParamLists  = new Dictionary<string, List<Param>>();
         foreach (var mod in modules)
             foreach (var fun in mod.Funs)
+            {
                 funReturnTypes[fun.Name] = fun.ReturnType;
+                funParamLists[fun.Name]  = fun.Params;
+            }
 
         if (isDll)
         {
@@ -81,7 +86,7 @@ static class Codegen
                 {
                     funOffsets[(mod.Name, fun.Name)] = code.Count;
                     EmitFun(fun, mod.Name, moduleAliases[mod.Name],
-                            importMap, varVas, recordMap, moduleConsts, funReturnTypes,
+                            importMap, varVas, recordMap, moduleConsts, funReturnTypes, funParamLists,
                             code, iatRefs, imports, localCallRefs, rdataBytes);
                 }
         }
@@ -100,7 +105,7 @@ static class Codegen
 
             funOffsets[(entryModule.Name, entryFun.Name)] = code.Count;
             EmitFun(entryFun, entryModule.Name, moduleAliases[entryModule.Name],
-                    importMap, varVas, recordMap, moduleConsts, funReturnTypes,
+                    importMap, varVas, recordMap, moduleConsts, funReturnTypes, funParamLists,
                     code, iatRefs, imports, localCallRefs, rdataBytes);
 
             foreach (var mod in modules)
@@ -109,7 +114,7 @@ static class Codegen
                     if (fun == entryFun) continue;
                     funOffsets[(mod.Name, fun.Name)] = code.Count;
                     EmitFun(fun, mod.Name, moduleAliases[mod.Name],
-                            importMap, varVas, recordMap, moduleConsts, funReturnTypes,
+                            importMap, varVas, recordMap, moduleConsts, funReturnTypes, funParamLists,
                             code, iatRefs, imports, localCallRefs, rdataBytes);
                 }
         }
@@ -458,6 +463,7 @@ static class Codegen
         Dictionary<string, RecordDecl> recordMap,
         Dictionary<string, Expr> moduleConsts,
         Dictionary<string, string> funReturnTypes,
+        Dictionary<string, List<Param>> funParamLists,
         List<byte> code,
         List<IatRef> iatRefs,
         List<ImportSpec> imports,
@@ -504,7 +510,7 @@ static class Codegen
                              moduleName, aliasMap, localCallRefs,
                              localBytes, needsFrame, isStdcall, paramStackBytes,
                              new Dictionary<string, Expr>(moduleConsts), rdataBytes,
-                             fun.ReturnType, funReturnTypes, retBufOffsets);
+                             fun.ReturnType, funReturnTypes, retBufOffsets, funParamLists);
 
         EmitStmts(fun.Body, ctx);
 
@@ -840,13 +846,14 @@ static class Codegen
         }
 
         var call        = (CallExpr)stmt.Call;
-        int numUserArgs = call.Args.Count;
+        var callArgs    = call.ArgNames is not null ? ReorderArgs(call, ctx) : call.Args;
+        int numUserArgs = callArgs.Count;
 
         ctx.Code.AddRange(X86.LeaEaxEbpDisp8((sbyte)bufStart)); // hidden ptr
         ctx.Code.AddRange(X86.PushEax());                        // save it
 
         for (int i = numUserArgs - 1; i >= 0; i--)              // push user args R-L
-            EmitExpr(call.Args[i], ctx);
+            EmitExpr(callArgs[i], ctx);
 
         ctx.Code.AddRange(X86.MovEaxEspDisp8((byte)(numUserArgs * 4))); // reload hidden ptr
         ctx.Code.AddRange(X86.PushEax());                                // push as callee arg
@@ -887,15 +894,16 @@ static class Codegen
         }
 
         var call        = (CallExpr)stmt.Call;
+        var callArgs    = call.ArgNames is not null ? ReorderArgs(call, ctx) : call.Args;
         int numRetVals  = stmt.Names.Count;
-        int numUserArgs = call.Args.Count;
+        int numUserArgs = callArgs.Count;
 
         ctx.Code.AddRange(X86.SubEspImm8((byte)(numRetVals * 4))); // allocate temp buffer
         ctx.Code.AddRange(X86.LeaEaxEsp());                        // hidden ptr = ESP
         ctx.Code.AddRange(X86.PushEax());                          // save it
 
         for (int i = numUserArgs - 1; i >= 0; i--)                // push user args R-L
-            EmitExpr(call.Args[i], ctx);
+            EmitExpr(callArgs[i], ctx);
 
         ctx.Code.AddRange(X86.MovEaxEspDisp8((byte)(numUserArgs * 4))); // reload hidden ptr
         ctx.Code.AddRange(X86.PushEax());                                // push as callee arg
@@ -921,11 +929,33 @@ static class Codegen
         }
     }
 
+    // Reorder call args to match declared parameter order when names are provided.
+    static List<Expr> ReorderArgs(CallExpr call, FunCtx ctx)
+    {
+        if (!ctx.FunParamLists.TryGetValue(call.Name, out var paramList))
+            return call.Args;
+        var ordered = new Expr[paramList.Count];
+        for (int i = 0; i < call.Args.Count; i++)
+        {
+            string? argName = call.ArgNames![i];
+            if (argName is null)
+                ordered[i] = call.Args[i];
+            else
+            {
+                int idx = paramList.FindIndex(p => p.Name == argName);
+                if (idx < 0) throw new InvalidOperationException($"No param '{argName}' on '{call.Name}'");
+                ordered[idx] = call.Args[i];
+            }
+        }
+        return [.. ordered];
+    }
+
     static void EmitCallExpr(CallExpr callExpr, FunCtx ctx)
     {
+        var args = callExpr.ArgNames is not null ? ReorderArgs(callExpr, ctx) : callExpr.Args;
         // Push args right-to-left (works for both cdecl and stdcall)
-        for (int i = callExpr.Args.Count - 1; i >= 0; i--)
-            EmitExpr(callExpr.Args[i], ctx);
+        for (int i = args.Count - 1; i >= 0; i--)
+            EmitExpr(args[i], ctx);
 
         // Unqualified call to a [dll_import] extern: use IAT-indirect call (stdcall, callee cleans up)
         if (callExpr.Qualifier is null && ctx.ImportMap.TryGetValue(callExpr.Name, out var importSpec))

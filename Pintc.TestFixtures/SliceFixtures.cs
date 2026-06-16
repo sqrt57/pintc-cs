@@ -859,6 +859,137 @@ public static class SliceFixtures
         }
         """;
 
+    public const string Slice16CastSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var big: u32 = 300;
+                var b8: u32 = cast(big, u8);
+                if (b8 != 44) { exit_process(1); }
+
+                var wide: u32 = cast(200, u32);
+                if (wide != 200) { exit_process(2); }
+
+                var x: u32 = 500;
+                var t8: u32 = to_u8(x);
+                if (t8 != 244) { exit_process(3); }
+
+                var y: u32 = 70000;
+                var t16: u32 = to_u16(y);
+                if (t16 != 4464) { exit_process(4); }
+
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice16SizeofLengthSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var s1: u32 = sizeof(u8);
+                if (s1 != 1) { exit_process(1); }
+
+                var s2: u32 = sizeof(u32);
+                if (s2 != 4) { exit_process(2); }
+
+                var s3: u32 = sizeof([5]u32);
+                if (s3 != 20) { exit_process(3); }
+
+                var arr: [7]u32;
+                var len: u32 = length(arr);
+                if (len != 7) { exit_process(4); }
+
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice16DivmodSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var (q: u32, r: u32) = divmod(17, 5);
+                if (q != 3) { exit_process(1); }
+                if (r != 2) { exit_process(2); }
+
+                var (q2: u32, r2: u32) = divmod(100, 7);
+                if (q2 != 14) { exit_process(3); }
+                if (r2 != 2) { exit_process(4); }
+
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice16MulSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var (lo: u32, hi: u32) = mul(6, 7);
+                if (lo != 42) { exit_process(1); }
+                if (hi != 0) { exit_process(2); }
+
+                var (lo2: u32, hi2: u32) = mul(2147483648, 3);
+                if (lo2 != 2147483648) { exit_process(3); }
+                if (hi2 != 1) { exit_process(4); }
+
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice17NamedArgsSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            fun subtract(minuend: u32, subtrahend: u32) -> u32 {
+                return minuend - subtrahend;
+            }
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                // named args in declared order
+                var r1: u32 = subtract(minuend: 10, subtrahend: 3);
+                if (r1 != 7) { exit_process(1); }
+
+                // named args out of declared order — key order-independence check
+                var r2: u32 = subtract(subtrahend: 3, minuend: 10);
+                if (r2 != 7) { exit_process(2); }
+
+                exit_process(0);
+            }
+        }
+        """;
+
     // Demonstrates the re-evaluation bug: const initializer is a call whose side
     // effect is visible through a pointer. With the bug the call runs once per use
     // (a=1, b=2). With the fix it runs once at the declaration (a=1, b=1).

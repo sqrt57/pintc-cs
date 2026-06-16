@@ -21,7 +21,11 @@ enum BinaryOp
 enum UnaryOp { Neg, BitNot, Not }
 
 abstract record Expr;
-record CallExpr(string? Qualifier, string Name, List<Expr> Args) : Expr;
+record CallExpr(string? Qualifier, string Name, List<Expr> Args, List<string?>? ArgNames) : Expr
+{
+    public CallExpr(string? qualifier, string name, List<Expr> args)
+        : this(qualifier, name, args, null) { }
+}
 record IntLiteralExpr(long Value) : Expr;
 record BoolLiteralExpr(bool Value) : Expr;
 record VarRefExpr(string Name) : Expr;
@@ -35,6 +39,12 @@ record ArrowExpr(Expr Ptr, string Field) : Expr;
 record CharLiteralExpr(byte Value) : Expr;
 record StringLiteralExpr(byte[] Bytes) : Expr;
 record StringConstExpr(uint RdataOffset, int ByteCount) : Expr;
+record CastExpr(Expr Value, string TargetType) : Expr;
+record SizeofExpr(string TypeName) : Expr;
+record LengthExpr(string ArrayName) : Expr;
+record ToTypeExpr(Expr Value, string TargetType) : Expr;
+record DivmodExpr(Expr A, Expr B) : Expr;
+record MulWideExpr(Expr A, Expr B) : Expr;
 
 abstract record Stmt;
 record CallStmt(string Callee, List<Expr> Args) : Stmt;
@@ -54,10 +64,12 @@ record ForStmt(string VarName, string VarTypeName, Expr VarInit, Expr Condition,
 record LocalConstDecl(string Name, string TypeName, Expr Init) : Stmt;
 // var (a: T, _) = call(); — introduces new locals from a multi-return call.
 // Items: (Name=null, TypeName=null) for discard (_), (Name, TypeName) otherwise.
-record MultiVarDecl(List<(string? Name, string? TypeName)> Items, CallExpr Call) : Stmt;
+// RHS is CallExpr for user-defined functions or DivmodExpr/MulWideExpr for builtins.
+record MultiVarDecl(List<(string? Name, string? TypeName)> Items, Expr Call) : Stmt;
 // (a, b) = call(); — positional assign into existing locals from a multi-return call.
 // Names: null for discard (_), variable name otherwise.
-record MultiAssignStmt(List<string?> Names, CallExpr Call) : Stmt;
+// RHS is CallExpr for user-defined functions or DivmodExpr/MulWideExpr for builtins.
+record MultiAssignStmt(List<string?> Names, Expr Call) : Stmt;
 
 record RecordField(string Name, string TypeName);
 record RecordDecl(string Name, List<RecordField> Fields);

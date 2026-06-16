@@ -407,16 +407,27 @@ class Parser(List<Token> tokens)
     CallExpr? ParseCallArgs(string? qualifier, string name)
     {
         if (Eat(TokenKind.LParen) is null) return null;
-        var args = new List<Expr>();
+        var args     = new List<Expr>();
+        var argNames = new List<string?>();
+        bool hasNamed = false;
         while (!Check(TokenKind.RParen) && !Check(TokenKind.Eof))
         {
+            string? argName = null;
+            if (Check(TokenKind.Ident) && Peek().Kind == TokenKind.Colon)
+            {
+                argName  = Current.Text;
+                Advance(); // name
+                Advance(); // ':'
+                hasNamed = true;
+            }
             var arg = ParseExpr();
             if (arg is null) return null;
             args.Add(arg);
+            argNames.Add(argName);
             if (!TryEat(TokenKind.Comma)) break;
         }
         if (Eat(TokenKind.RParen) is null) return null;
-        return new CallExpr(qualifier, name, args);
+        return new CallExpr(qualifier, name, args, hasNamed ? argNames : null);
     }
 
     Stmt? ParseStmt()
@@ -703,13 +714,13 @@ class Parser(List<Token> tokens)
         if (Eat(TokenKind.Eq) is null) return null;
         var rhs = ParseExpr();
         if (rhs is null) return null;
-        if (rhs is not CallExpr callExpr)
+        if (rhs is not (CallExpr or DivmodExpr or MulWideExpr))
         {
             Error("expected a function call on the right-hand side of multi-var declaration");
             return null;
         }
         if (Eat(TokenKind.Semicolon) is null) return null;
-        return new MultiVarDecl(items, callExpr);
+        return new MultiVarDecl(items, rhs);
     }
 
     // (a, b) = call();
@@ -735,13 +746,85 @@ class Parser(List<Token> tokens)
         if (Eat(TokenKind.Eq) is null) return null;
         var rhs = ParseExpr();
         if (rhs is null) return null;
-        if (rhs is not CallExpr callExpr)
+        if (rhs is not (CallExpr or DivmodExpr or MulWideExpr))
         {
             Error("expected a function call on the right-hand side of multi-assign");
             return null;
         }
         if (Eat(TokenKind.Semicolon) is null) return null;
-        return new MultiAssignStmt(names, callExpr);
+        return new MultiAssignStmt(names, rhs);
+    }
+
+    // ── Builtin expressions ────────────────────────────────────────────────────
+
+    // cast(expr, T)
+    Expr? ParseCastExpr()
+    {
+        if (Eat(TokenKind.LParen) is null) return null;
+        var value = ParseExpr();
+        if (value is null) return null;
+        if (Eat(TokenKind.Comma) is null) return null;
+        var targetType = ParseType();
+        if (targetType is null) return null;
+        if (Eat(TokenKind.RParen) is null) return null;
+        return new CastExpr(value, targetType);
+    }
+
+    // sizeof(T)
+    Expr? ParseSizeofExpr()
+    {
+        if (Eat(TokenKind.LParen) is null) return null;
+        var typeName = ParseType();
+        if (typeName is null) return null;
+        if (Eat(TokenKind.RParen) is null) return null;
+        return new SizeofExpr(typeName);
+    }
+
+    // length(arrayName)
+    Expr? ParseLengthExpr()
+    {
+        if (Eat(TokenKind.LParen) is null) return null;
+        var name = Eat(TokenKind.Ident);
+        if (name is null) return null;
+        if (Eat(TokenKind.RParen) is null) return null;
+        return new LengthExpr(name.Text);
+    }
+
+    // to_u8(expr), to_u16(expr), to_u32(expr), to_u64(expr),
+    // to_i8(expr), to_i16(expr), to_i32(expr), to_i64(expr)
+    Expr? ParseToTypeExpr(string targetType)
+    {
+        if (Eat(TokenKind.LParen) is null) return null;
+        var value = ParseExpr();
+        if (value is null) return null;
+        if (Eat(TokenKind.RParen) is null) return null;
+        return new ToTypeExpr(value, targetType);
+    }
+
+    // divmod(a, b) — tuple-returning: (quotient, remainder)
+    Expr? ParseDivmodExpr()
+    {
+        if (Eat(TokenKind.LParen) is null) return null;
+        var a = ParseExpr();
+        if (a is null) return null;
+        if (Eat(TokenKind.Comma) is null) return null;
+        var b = ParseExpr();
+        if (b is null) return null;
+        if (Eat(TokenKind.RParen) is null) return null;
+        return new DivmodExpr(a, b);
+    }
+
+    // mul(a, b) — tuple-returning wide multiply: (lo, hi)
+    Expr? ParseMulWideExpr()
+    {
+        if (Eat(TokenKind.LParen) is null) return null;
+        var a = ParseExpr();
+        if (a is null) return null;
+        if (Eat(TokenKind.Comma) is null) return null;
+        var b = ParseExpr();
+        if (b is null) return null;
+        if (Eat(TokenKind.RParen) is null) return null;
+        return new MulWideExpr(a, b);
     }
 
     CallStmt? ParseCallStmt()
@@ -1000,9 +1083,20 @@ class Parser(List<Token> tokens)
                 if (funcTok is null) return null;
                 return ParseCallArgs(identName, funcTok.Text);
             }
-            // Unqualified call expression: ident(...)
+            // Unqualified call expression or builtin: ident(...)
             if (Check(TokenKind.LParen))
-                return ParseCallArgs(null, identName);
+                return identName switch
+                {
+                    "cast"   => ParseCastExpr(),
+                    "sizeof" => ParseSizeofExpr(),
+                    "length" => ParseLengthExpr(),
+                    "divmod" => ParseDivmodExpr(),
+                    "mul"    => ParseMulWideExpr(),
+                    "to_u8" or "to_u16" or "to_u32" or "to_u64"
+                    or "to_i8" or "to_i16" or "to_i32" or "to_i64"
+                             => ParseToTypeExpr(identName),
+                    _        => ParseCallArgs(null, identName),
+                };
             if (Check(TokenKind.Dot))
             {
                 var path = new List<string>();
