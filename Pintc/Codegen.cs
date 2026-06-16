@@ -214,6 +214,18 @@ static class Codegen
         _ => StackSlotSize(typeName, recordMap),
     };
 
+    // Actual byte size of a type: N*ByteSize(elem) for arrays, Stride for scalars/records.
+    static int ByteSize(string typeName, Dictionary<string, RecordDecl> recordMap)
+    {
+        if (typeName.StartsWith('['))
+        {
+            int close = typeName.IndexOf(']');
+            int n = int.Parse(typeName[1..close]);
+            return n * ByteSize(typeName[(close + 1)..], recordMap);
+        }
+        return Stride(typeName, recordMap);
+    }
+
     static string? GetExprType(Expr expr, Dictionary<string, string> types) => expr switch
     {
         VarRefExpr v when types.TryGetValue(v.Name, out var t) => t,
@@ -807,25 +819,45 @@ static class Codegen
     //   Return values are now in their pre-allocated frame slots — no extra pops needed.
     static void EmitMultiVarDecl(MultiVarDecl stmt, FunCtx ctx)
     {
-        int numUserArgs = stmt.Call.Args.Count;
-        int bufStart    = ctx.RetBufOffsets[stmt];
+        int bufStart = ctx.RetBufOffsets[stmt];
+        if (stmt.Call is DivmodExpr dm)
+        {
+            EmitExpr(dm.A, ctx); EmitExpr(dm.B, ctx);
+            ctx.Code.AddRange(X86.PopEcx()); ctx.Code.AddRange(X86.PopEax());
+            ctx.Code.AddRange(X86.XorEdxEdx()); ctx.Code.AddRange(X86.DivEcx());
+            ctx.Code.AddRange(X86.MovEbpDisp8Eax((sbyte)bufStart));
+            ctx.Code.AddRange(X86.MovEbpDisp8Edx((sbyte)(bufStart + 4)));
+            return;
+        }
+        if (stmt.Call is MulWideExpr mw)
+        {
+            EmitExpr(mw.A, ctx); EmitExpr(mw.B, ctx);
+            ctx.Code.AddRange(X86.PopEcx()); ctx.Code.AddRange(X86.PopEax());
+            ctx.Code.AddRange(X86.MulEcx());
+            ctx.Code.AddRange(X86.MovEbpDisp8Eax((sbyte)bufStart));
+            ctx.Code.AddRange(X86.MovEbpDisp8Edx((sbyte)(bufStart + 4)));
+            return;
+        }
+
+        var call        = (CallExpr)stmt.Call;
+        int numUserArgs = call.Args.Count;
 
         ctx.Code.AddRange(X86.LeaEaxEbpDisp8((sbyte)bufStart)); // hidden ptr
         ctx.Code.AddRange(X86.PushEax());                        // save it
 
         for (int i = numUserArgs - 1; i >= 0; i--)              // push user args R-L
-            EmitExpr(stmt.Call.Args[i], ctx);
+            EmitExpr(call.Args[i], ctx);
 
         ctx.Code.AddRange(X86.MovEaxEspDisp8((byte)(numUserArgs * 4))); // reload hidden ptr
         ctx.Code.AddRange(X86.PushEax());                                // push as callee arg
 
         string targetModule = ctx.ModuleName;
-        if (stmt.Call.Qualifier is not null &&
-            !ctx.AliasMap.TryGetValue(stmt.Call.Qualifier, out targetModule!))
-            throw new InvalidOperationException($"Unknown import alias '{stmt.Call.Qualifier}'");
+        if (call.Qualifier is not null &&
+            !ctx.AliasMap.TryGetValue(call.Qualifier, out targetModule!))
+            throw new InvalidOperationException($"Unknown import alias '{call.Qualifier}'");
 
         ctx.Code.AddRange(X86.CallRel32());
-        ctx.LocalCallRefs.Add(new LocalCallRef(ctx.Code.Count - 4, targetModule, stmt.Call.Name));
+        ctx.LocalCallRefs.Add(new LocalCallRef(ctx.Code.Count - 4, targetModule, call.Name));
 
         ctx.Code.AddRange(X86.AddEspImm8((byte)((1 + numUserArgs + 1) * 4)));
     }
@@ -835,26 +867,46 @@ static class Codegen
     // then pop each return value into its existing local slot.
     static void EmitMultiAssignStmt(MultiAssignStmt stmt, FunCtx ctx)
     {
+        if (stmt.Call is DivmodExpr dm)
+        {
+            EmitExpr(dm.A, ctx); EmitExpr(dm.B, ctx);
+            ctx.Code.AddRange(X86.PopEcx()); ctx.Code.AddRange(X86.PopEax());
+            ctx.Code.AddRange(X86.XorEdxEdx()); ctx.Code.AddRange(X86.DivEcx());
+            if (stmt.Names[0] is string q) ctx.Code.AddRange(X86.MovEbpDisp8Eax((sbyte)ctx.Offsets[q]));
+            if (stmt.Names[1] is string r) ctx.Code.AddRange(X86.MovEbpDisp8Edx((sbyte)ctx.Offsets[r]));
+            return;
+        }
+        if (stmt.Call is MulWideExpr mw)
+        {
+            EmitExpr(mw.A, ctx); EmitExpr(mw.B, ctx);
+            ctx.Code.AddRange(X86.PopEcx()); ctx.Code.AddRange(X86.PopEax());
+            ctx.Code.AddRange(X86.MulEcx());
+            if (stmt.Names[0] is string lo) ctx.Code.AddRange(X86.MovEbpDisp8Eax((sbyte)ctx.Offsets[lo]));
+            if (stmt.Names[1] is string hi) ctx.Code.AddRange(X86.MovEbpDisp8Edx((sbyte)ctx.Offsets[hi]));
+            return;
+        }
+
+        var call        = (CallExpr)stmt.Call;
         int numRetVals  = stmt.Names.Count;
-        int numUserArgs = stmt.Call.Args.Count;
+        int numUserArgs = call.Args.Count;
 
         ctx.Code.AddRange(X86.SubEspImm8((byte)(numRetVals * 4))); // allocate temp buffer
         ctx.Code.AddRange(X86.LeaEaxEsp());                        // hidden ptr = ESP
         ctx.Code.AddRange(X86.PushEax());                          // save it
 
         for (int i = numUserArgs - 1; i >= 0; i--)                // push user args R-L
-            EmitExpr(stmt.Call.Args[i], ctx);
+            EmitExpr(call.Args[i], ctx);
 
         ctx.Code.AddRange(X86.MovEaxEspDisp8((byte)(numUserArgs * 4))); // reload hidden ptr
         ctx.Code.AddRange(X86.PushEax());                                // push as callee arg
 
         string targetModule = ctx.ModuleName;
-        if (stmt.Call.Qualifier is not null &&
-            !ctx.AliasMap.TryGetValue(stmt.Call.Qualifier, out targetModule!))
-            throw new InvalidOperationException($"Unknown import alias '{stmt.Call.Qualifier}'");
+        if (call.Qualifier is not null &&
+            !ctx.AliasMap.TryGetValue(call.Qualifier, out targetModule!))
+            throw new InvalidOperationException($"Unknown import alias '{call.Qualifier}'");
 
         ctx.Code.AddRange(X86.CallRel32());
-        ctx.LocalCallRefs.Add(new LocalCallRef(ctx.Code.Count - 4, targetModule, stmt.Call.Name));
+        ctx.LocalCallRefs.Add(new LocalCallRef(ctx.Code.Count - 4, targetModule, call.Name));
 
         ctx.Code.AddRange(X86.AddEspImm8((byte)((1 + numUserArgs) * 4))); // hidden ptr + user args
         ctx.Code.AddRange(X86.AddEspImm8(4));                              // hidden ptr save
@@ -1021,6 +1073,45 @@ static class Codegen
                 {
                     EmitBinaryOp(b.Op, ctx.Code);
                 }
+                break;
+            }
+            case CastExpr cast:
+            {
+                EmitExpr(cast.Value, ctx);
+                ctx.Code.AddRange(X86.PopEax());
+                switch (cast.TargetType)
+                {
+                    case "u8":  ctx.Code.AddRange(X86.AndEaxImm32(0xFF));   break;
+                    case "u16": ctx.Code.AddRange(X86.AndEaxImm32(0xFFFF)); break;
+                }
+                ctx.Code.AddRange(X86.PushEax());
+                break;
+            }
+            case SizeofExpr sizeofExpr:
+            {
+                int sz = ByteSize(sizeofExpr.TypeName, ctx.RecordMap);
+                ctx.Code.AddRange(sz is >= 0 and <= 127 ? X86.PushImm8((byte)sz) : X86.PushImm32((uint)sz));
+                break;
+            }
+            case LengthExpr lengthExpr:
+            {
+                string arrType = ctx.Types[lengthExpr.ArrayName];
+                int n = int.Parse(arrType[1..arrType.IndexOf(']')]);
+                ctx.Code.AddRange(n is >= 0 and <= 127 ? X86.PushImm8((byte)n) : X86.PushImm32((uint)n));
+                break;
+            }
+            case ToTypeExpr toType:
+            {
+                EmitExpr(toType.Value, ctx);
+                ctx.Code.AddRange(X86.PopEax());
+                switch (toType.TargetType)
+                {
+                    case "to_u8":  ctx.Code.AddRange(X86.AndEaxImm32(0xFF));   break;
+                    case "to_u16": ctx.Code.AddRange(X86.AndEaxImm32(0xFFFF)); break;
+                    case "to_i8":  ctx.Code.AddRange(X86.MovsxEaxAl());        break;
+                    case "to_i16": ctx.Code.AddRange(X86.MovsxEaxAx());        break;
+                }
+                ctx.Code.AddRange(X86.PushEax());
                 break;
             }
             default:

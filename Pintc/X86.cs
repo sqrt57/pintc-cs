@@ -132,6 +132,25 @@ static class X86
     public static byte[] SetaeAl()    => [0x0F, 0x93, 0xC0]; // !CF    (unsigned >=)
     public static byte[] MovzxEaxAl() => [0x0F, 0xB6, 0xC0]; // zero-extend AL into EAX
 
+    // and eax, imm32 — mask EAX to a fixed bit-width (used by cast/to_u8/to_u16)
+    public static byte[] AndEaxImm32(uint mask) =>
+        [0x25, (byte)(mask & 0xFF), (byte)(mask >> 8 & 0xFF), (byte)(mask >> 16 & 0xFF), (byte)(mask >> 24)];
+
+    // movsx eax, al  — sign-extend AL into EAX (to_i8)
+    public static byte[] MovsxEaxAl() => [0x0F, 0xBE, 0xC0];
+
+    // movsx eax, ax  — sign-extend AX into EAX (to_i16)
+    public static byte[] MovsxEaxAx() => [0x0F, 0xBF, 0xC0];
+
+    // mul ecx — unsigned wide multiply: EDX:EAX = EAX * ECX (mul builtin)
+    public static byte[] MulEcx() => [0xF7, 0xE1];
+
+    // mov [ebp+disp8], eax — store EAX into a frame slot (inline builtin results)
+    public static byte[] MovEbpDisp8Eax(sbyte disp) => [0x89, 0x45, (byte)disp];
+
+    // mov [ebp+disp8], edx — store EDX into a frame slot (inline builtin results)
+    public static byte[] MovEbpDisp8Edx(sbyte disp) => [0x89, 0x55, (byte)disp];
+
     // xor eax, 1 — inverts a bool (0→1, 1→0)
     public static byte[] XorEaxOne() => [0x83, 0xF0, 0x01];
 
