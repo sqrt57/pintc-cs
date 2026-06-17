@@ -21,8 +21,10 @@ record FunCtx(
     int                                 ParamStackBytes,
     Dictionary<string, Expr>            Consts,
     List<byte>                          RdataBytes,
-    string                              ReturnType,    // this function's return type string
+    string                              ReturnType,     // this function's return type string
+    List<string?>                       ReturnNames,    // this function's return names (empty = positional)
     Dictionary<string, string>          FunReturnTypes, // funcName → returnType for all Pint funs
+    Dictionary<string, List<string?>>   FunReturnNames, // funcName → return names for named-return funs
     Dictionary<MultiVarDecl, int>       RetBufOffsets,  // multi-var decl → buffer start EBP offset
     Dictionary<string, List<Param>>     FunParamLists); // funcName → params, for named-arg reordering
 
@@ -70,12 +72,15 @@ static class Codegen
 
         // Flat map of all Pint function return types (for multi-return call-site convention)
         var funReturnTypes = new Dictionary<string, string>();
+        var funReturnNames = new Dictionary<string, List<string?>>();
         var funParamLists  = new Dictionary<string, List<Param>>();
         foreach (var mod in modules)
             foreach (var fun in mod.Funs)
             {
                 funReturnTypes[fun.Name] = fun.ReturnType;
                 funParamLists[fun.Name]  = fun.Params;
+                if (fun.ReturnNames is not null)
+                    funReturnNames[fun.Name] = fun.ReturnNames;
             }
 
         if (isDll)
@@ -86,7 +91,7 @@ static class Codegen
                 {
                     funOffsets[(mod.Name, fun.Name)] = code.Count;
                     EmitFun(fun, mod.Name, moduleAliases[mod.Name],
-                            importMap, varVas, recordMap, moduleConsts, funReturnTypes, funParamLists,
+                            importMap, varVas, recordMap, moduleConsts, funReturnTypes, funReturnNames, funParamLists,
                             code, iatRefs, imports, localCallRefs, rdataBytes);
                 }
         }
@@ -105,7 +110,7 @@ static class Codegen
 
             funOffsets[(entryModule.Name, entryFun.Name)] = code.Count;
             EmitFun(entryFun, entryModule.Name, moduleAliases[entryModule.Name],
-                    importMap, varVas, recordMap, moduleConsts, funReturnTypes, funParamLists,
+                    importMap, varVas, recordMap, moduleConsts, funReturnTypes, funReturnNames, funParamLists,
                     code, iatRefs, imports, localCallRefs, rdataBytes);
 
             foreach (var mod in modules)
@@ -114,7 +119,7 @@ static class Codegen
                     if (fun == entryFun) continue;
                     funOffsets[(mod.Name, fun.Name)] = code.Count;
                     EmitFun(fun, mod.Name, moduleAliases[mod.Name],
-                            importMap, varVas, recordMap, moduleConsts, funReturnTypes, funParamLists,
+                            importMap, varVas, recordMap, moduleConsts, funReturnTypes, funReturnNames, funParamLists,
                             code, iatRefs, imports, localCallRefs, rdataBytes);
                 }
         }
@@ -463,6 +468,7 @@ static class Codegen
         Dictionary<string, RecordDecl> recordMap,
         Dictionary<string, Expr> moduleConsts,
         Dictionary<string, string> funReturnTypes,
+        Dictionary<string, List<string?>> funReturnNames,
         Dictionary<string, List<Param>> funParamLists,
         List<byte> code,
         List<IatRef> iatRefs,
@@ -510,7 +516,8 @@ static class Codegen
                              moduleName, aliasMap, localCallRefs,
                              localBytes, needsFrame, isStdcall, paramStackBytes,
                              new Dictionary<string, Expr>(moduleConsts), rdataBytes,
-                             fun.ReturnType, funReturnTypes, retBufOffsets, funParamLists);
+                             fun.ReturnType, fun.ReturnNames ?? [],
+                             funReturnTypes, funReturnNames, retBufOffsets, funParamLists);
 
         EmitStmts(fun.Body, ctx);
 
@@ -782,13 +789,18 @@ static class Codegen
 
     static void EmitReturnStmt(ReturnStmt stmt, FunCtx ctx)
     {
-        if (IsMultiReturn(ctx.ReturnType) && stmt.Values.Count > 0)
+        // Reorder values to match declared return position when named form is used.
+        var values = (stmt.ReturnNames is not null && ctx.ReturnNames.Count > 0)
+            ? ReorderReturnValues(stmt.Values, stmt.ReturnNames, ctx.ReturnNames)
+            : stmt.Values;
+
+        if (IsMultiReturn(ctx.ReturnType) && values.Count > 0)
         {
             // Write each return value through the hidden pointer at [EBP+8].
             // Reload ECX from [EBP+8] before each write so expression evaluation can't corrupt it.
-            for (int i = 0; i < stmt.Values.Count; i++)
+            for (int i = 0; i < values.Count; i++)
             {
-                EmitExpr(stmt.Values[i], ctx);
+                EmitExpr(values[i], ctx);
                 ctx.Code.AddRange(X86.PopEax());
                 ctx.Code.AddRange(X86.MovEcxEbpDisp8(8)); // mov ecx, [ebp+8]
                 if (i == 0)
@@ -797,9 +809,9 @@ static class Codegen
                     ctx.Code.AddRange(X86.MovMemEcxDisp8Eax((sbyte)(i * 4)));
             }
         }
-        else if (stmt.Values.Count == 1)
+        else if (values.Count == 1)
         {
-            EmitExpr(stmt.Values[0], ctx);
+            EmitExpr(values[0], ctx);
             ctx.Code.AddRange(X86.PopEax());
         }
         if (ctx.NeedsFrame)
@@ -869,11 +881,17 @@ static class Codegen
         ctx.Code.AddRange(X86.AddEspImm8((byte)((1 + numUserArgs + 1) * 4)));
     }
 
-    // Caller side for: (lo, hi) = call();
+    // Caller side for: (lo, hi) = call();  or  (quot: q, rem: r) = call();
     // No pre-allocated buffer — allocate a temporary buffer dynamically on the stack,
     // then pop each return value into its existing local slot.
     static void EmitMultiAssignStmt(MultiAssignStmt stmt, FunCtx ctx)
     {
+        // Reorder local-variable names to match declared return order when named form is used.
+        var names = stmt.Names;
+        if (stmt.ReturnNames is not null && stmt.Call is CallExpr namedCall &&
+            ctx.FunReturnNames.TryGetValue(namedCall.Name, out var declaredRetNames))
+            names = ReorderAssignNames(stmt.Names, stmt.ReturnNames, declaredRetNames);
+
         if (stmt.Call is DivmodExpr dm)
         {
             EmitExpr(dm.A, ctx); EmitExpr(dm.B, ctx);
@@ -895,7 +913,7 @@ static class Codegen
 
         var call        = (CallExpr)stmt.Call;
         var callArgs    = call.ArgNames is not null ? ReorderArgs(call, ctx) : call.Args;
-        int numRetVals  = stmt.Names.Count;
+        int numRetVals  = names.Count;
         int numUserArgs = callArgs.Count;
 
         ctx.Code.AddRange(X86.SubEspImm8((byte)(numRetVals * 4))); // allocate temp buffer
@@ -920,9 +938,9 @@ static class Codegen
         ctx.Code.AddRange(X86.AddEspImm8(4));                              // hidden ptr save
 
         // Return buffer is now on top of the stack; pop into target locals (or skip discards).
-        for (int i = 0; i < stmt.Names.Count; i++)
+        for (int i = 0; i < names.Count; i++)
         {
-            if (stmt.Names[i] is string name)
+            if (names[i] is string name)
                 ctx.Code.AddRange(X86.PopToEbpDisp8((sbyte)ctx.Offsets[name]));
             else
                 ctx.Code.AddRange(X86.AddEspImm8(4));
@@ -946,6 +964,32 @@ static class Codegen
                 if (idx < 0) throw new InvalidOperationException($"No param '{argName}' on '{call.Name}'");
                 ordered[idx] = call.Args[i];
             }
+        }
+        return [.. ordered];
+    }
+
+    // Reorder return values to match declared return order for named return statements.
+    static List<Expr> ReorderReturnValues(List<Expr> values, List<string?> givenNames, List<string?> declaredNames)
+    {
+        var ordered = new Expr[declaredNames.Count];
+        for (int i = 0; i < givenNames.Count; i++)
+        {
+            int idx = declaredNames.IndexOf(givenNames[i]);
+            if (idx < 0) throw new InvalidOperationException($"Unknown return name '{givenNames[i]}'");
+            ordered[idx] = values[i];
+        }
+        return [.. ordered];
+    }
+
+    // Reorder local-variable names to match declared return order for named assign-unpack.
+    static List<string?> ReorderAssignNames(List<string?> localNames, List<string?> givenRetNames, List<string?> declaredRetNames)
+    {
+        var ordered = new string?[declaredRetNames.Count];
+        for (int i = 0; i < givenRetNames.Count; i++)
+        {
+            int idx = declaredRetNames.IndexOf(givenRetNames[i]);
+            if (idx < 0) throw new InvalidOperationException($"Unknown return name '{givenRetNames[i]}'");
+            ordered[idx] = localNames[i];
         }
         return [.. ordered];
     }

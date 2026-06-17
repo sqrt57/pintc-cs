@@ -48,7 +48,10 @@ record MulWideExpr(Expr A, Expr B) : Expr;
 
 abstract record Stmt;
 record CallStmt(string Callee, List<Expr> Args) : Stmt;
-record ReturnStmt(List<Expr> Values) : Stmt;
+record ReturnStmt(List<Expr> Values, List<string?>? ReturnNames) : Stmt
+{
+    public ReturnStmt(List<Expr> values) : this(values, null) { }
+}
 record LocalVarDecl(string Name, string TypeName, Expr? Init) : Stmt;
 record AssignStmt(string Name, Expr Value) : Stmt;
 record IndexAssignStmt(string ArrayName, Expr Idx, Expr Value) : Stmt;
@@ -67,9 +70,13 @@ record LocalConstDecl(string Name, string TypeName, Expr Init) : Stmt;
 // RHS is CallExpr for user-defined functions or DivmodExpr/MulWideExpr for builtins.
 record MultiVarDecl(List<(string? Name, string? TypeName)> Items, Expr Call) : Stmt;
 // (a, b) = call(); — positional assign into existing locals from a multi-return call.
+// (ret: a, ret2: b) = call(); — named assign; ReturnNames holds the return-side names.
 // Names: null for discard (_), variable name otherwise.
 // RHS is CallExpr for user-defined functions or DivmodExpr/MulWideExpr for builtins.
-record MultiAssignStmt(List<string?> Names, Expr Call) : Stmt;
+record MultiAssignStmt(List<string?> Names, Expr Call, List<string?>? ReturnNames) : Stmt
+{
+    public MultiAssignStmt(List<string?> names, Expr call) : this(names, call, null) { }
+}
 
 record RecordField(string Name, string TypeName);
 record RecordDecl(string Name, List<RecordField> Fields);
@@ -82,12 +89,18 @@ record ExternFunDecl(
     string ReturnType);
 
 // A user-defined function.
+// ReturnNames: null or empty for positional returns; non-null list of optional names for named returns.
 record FunDecl(
     List<Attr> Attributes,
     string Name,
     List<Param> Params,
     string ReturnType,
-    List<Stmt> Body);
+    List<Stmt> Body,
+    List<string?>? ReturnNames)
+{
+    public FunDecl(List<Attr> attrs, string name, List<Param> parms, string ret, List<Stmt> body)
+        : this(attrs, name, parms, ret, body, null) { }
+}
 
 // A module-scope variable declaration.
 record ModuleVarDecl(string Name, string TypeName, Expr? Init);

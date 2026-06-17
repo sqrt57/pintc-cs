@@ -210,7 +210,7 @@ class Parser(List<Token> tokens)
         var parms = ParseParamList();
         if (parms is null) return null;
         if (Eat(TokenKind.Arrow) is null) return null;
-        var ret = ParseReturnType();
+        var ret = ParseReturnType(out _);
         if (ret is null) return null;
         if (Eat(TokenKind.Semicolon) is null) return null;
         return new ExternFunDecl(attrs, name.Text, parms, ret);
@@ -224,11 +224,12 @@ class Parser(List<Token> tokens)
         var parms = ParseParamList();
         if (parms is null) return null;
         if (Eat(TokenKind.Arrow) is null) return null;
-        var ret = ParseReturnType();
+        var ret = ParseReturnType(out var retNames);
         if (ret is null) return null;
         var body = ParseBlock();
         if (body is null) return null;
-        return new FunDecl(attrs, name.Text, parms, ret, body);
+        var namedReturns = retNames.Any(n => n is not null) ? retNames : null;
+        return new FunDecl(attrs, name.Text, parms, ret, body, namedReturns);
     }
 
     ModuleVarDecl? ParseModuleVarDecl()
@@ -364,23 +365,35 @@ class Parser(List<Token> tokens)
     {
         if (Eat(TokenKind.Return) is null) return null;
         if (TryEat(TokenKind.Semicolon)) return new ReturnStmt([]);
-        var values = new List<Expr>();
-        var first = ParseExpr();
-        if (first is null) return null;
-        values.Add(first);
-        while (TryEat(TokenKind.Comma))
+
+        // Named form: each element starts with ident ':'
+        bool isNamed = Check(TokenKind.Ident) && Peek().Kind == TokenKind.Colon;
+        var values   = new List<Expr>();
+        var names    = isNamed ? new List<string?>() : null;
+
+        do
         {
-            var next = ParseExpr();
-            if (next is null) return null;
-            values.Add(next);
-        }
+            if (isNamed)
+            {
+                var n = Eat(TokenKind.Ident);
+                if (n is null) return null;
+                if (Eat(TokenKind.Colon) is null) return null;
+                names!.Add(n.Text);
+            }
+            var val = ParseExpr();
+            if (val is null) return null;
+            values.Add(val);
+        } while (TryEat(TokenKind.Comma));
+
         if (Eat(TokenKind.Semicolon) is null) return null;
-        return new ReturnStmt(values);
+        return new ReturnStmt(values, names);
     }
 
     // Parses a function return type: "()" | "(" T1 "," T2 ... ")" | Type
-    string? ParseReturnType()
+    // Populates 'names' with optional return-value names (empty list for single-type or unit returns).
+    string? ParseReturnType(out List<string?> names)
     {
+        names = [];
         if (!Check(TokenKind.LParen)) return ParseType();
         Advance(); // consume '('
         if (TryEat(TokenKind.RParen)) return "()";
@@ -389,11 +402,15 @@ class Parser(List<Token> tokens)
         var types = new List<string>();
         do
         {
-            // Skip optional "name:" — only when an identifier is immediately followed by ':'
             if (Check(TokenKind.Ident) && Peek().Kind == TokenKind.Colon)
             {
+                names.Add(Current.Text);
                 Advance(); // name
                 Advance(); // ':'
+            }
+            else
+            {
+                names.Add(null);
             }
             var t = ParseType();
             if (t is null) return null;
@@ -723,25 +740,53 @@ class Parser(List<Token> tokens)
         return new MultiVarDecl(items, rhs);
     }
 
-    // (a, b) = call();
+    // (a, b) = call();            — positional
+    // (ret: a, ret2: b) = call(); — named; return-side names drive order-independence
     Stmt? ParseMultiAssignStmt()
     {
         if (Eat(TokenKind.LParen) is null) return null;
         var names = new List<string?>();
+
+        // Named form: first element is retname ':' localname
+        bool isNamed   = Check(TokenKind.Ident) && Peek().Kind == TokenKind.Colon;
+        var  retNames  = isNamed ? new List<string?>() : null;
+
         do
         {
-            if (Check(TokenKind.Ident) && Current.Text == "_")
+            if (isNamed)
             {
-                Advance();
-                names.Add(null);
+                var rn = Eat(TokenKind.Ident);
+                if (rn is null) return null;
+                retNames!.Add(rn.Text);
+                if (Eat(TokenKind.Colon) is null) return null;
+                if (Check(TokenKind.Ident) && Current.Text == "_")
+                {
+                    Advance();
+                    names.Add(null);
+                }
+                else
+                {
+                    var ln = Eat(TokenKind.Ident);
+                    if (ln is null) return null;
+                    names.Add(ln.Text);
+                }
             }
             else
             {
-                var n = Eat(TokenKind.Ident);
-                if (n is null) return null;
-                names.Add(n.Text);
+                if (Check(TokenKind.Ident) && Current.Text == "_")
+                {
+                    Advance();
+                    names.Add(null);
+                }
+                else
+                {
+                    var n = Eat(TokenKind.Ident);
+                    if (n is null) return null;
+                    names.Add(n.Text);
+                }
             }
         } while (TryEat(TokenKind.Comma));
+
         if (Eat(TokenKind.RParen) is null) return null;
         if (Eat(TokenKind.Eq) is null) return null;
         var rhs = ParseExpr();
@@ -752,7 +797,7 @@ class Parser(List<Token> tokens)
             return null;
         }
         if (Eat(TokenKind.Semicolon) is null) return null;
-        return new MultiAssignStmt(names, rhs);
+        return new MultiAssignStmt(names, rhs, retNames);
     }
 
     // ── Builtin expressions ────────────────────────────────────────────────────
