@@ -1055,6 +1055,45 @@ public static class SliceFixtures
         }
         """;
 
+    public const string Slice19Source = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var arr: [3]u32 = [10, 20, 30];
+                if (arr[0] != 10) { exit_process(1); }
+                if (arr[1] != 20) { exit_process(2); }
+                if (arr[2] != 30) { exit_process(3); }
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice19WriteSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var arr: [3]u32 = [1, 2, 3];
+                arr[1] = 99;
+                if (arr[0] != 1)  { exit_process(1); }
+                if (arr[1] != 99) { exit_process(2); }
+                if (arr[2] != 3)  { exit_process(3); }
+                exit_process(0);
+            }
+        }
+        """;
+
     // Demonstrates the re-evaluation bug: const initializer is a call whose side
     // effect is visible through a pointer. With the bug the call runs once per use
     // (a=1, b=2). With the fix it runs once at the declaration (a=1, b=1).

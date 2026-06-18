@@ -766,6 +766,19 @@ static class Codegen
     static void EmitLocalVarDecl(LocalVarDecl decl, FunCtx ctx)
     {
         if (decl.Init is null) return;
+        if (decl.Init is ArrayLiteralExpr arrLit)
+        {
+            int close    = decl.TypeName.IndexOf(']');
+            string elem  = decl.TypeName[(close + 1)..];
+            int stride   = StackSlotSize(elem, ctx.RecordMap);
+            int baseOff  = ctx.Offsets[decl.Name];
+            for (int i = 0; i < arrLit.Elements.Count; i++)
+            {
+                EmitExpr(arrLit.Elements[i], ctx);
+                ctx.Code.AddRange(X86.PopToEbpDisp8((sbyte)(baseOff + i * stride)));
+            }
+            return;
+        }
         EmitExpr(decl.Init, ctx);
         ctx.Code.AddRange(X86.PopToEbpDisp8((sbyte)ctx.Offsets[decl.Name]));
     }

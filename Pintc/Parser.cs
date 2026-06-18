@@ -1171,6 +1171,21 @@ class Parser(List<Token> tokens)
             return identExpr;
         }
 
+        if (Check(TokenKind.LBracket))
+        {
+            Advance();
+            var elements = new List<Expr>();
+            while (!Check(TokenKind.RBracket) && !Check(TokenKind.Eof))
+            {
+                var elem = ParseExpr();
+                if (elem is null) return null;
+                elements.Add(elem);
+                if (!TryEat(TokenKind.Comma)) break;
+            }
+            if (Eat(TokenKind.RBracket) is null) return null;
+            return new ArrayLiteralExpr(elements);
+        }
+
         if (Check(TokenKind.LParen))
         {
             Advance();
