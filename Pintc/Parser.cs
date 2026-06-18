@@ -1144,6 +1144,13 @@ class Parser(List<Token> tokens)
             return new IntLiteralExpr(value);
         }
 
+        if (Check(TokenKind.FloatLit))
+        {
+            var tok = Advance();
+            return new FloatLiteralExpr(double.Parse(tok.Text,
+                System.Globalization.CultureInfo.InvariantCulture));
+        }
+
         if (Check(TokenKind.StringLit))
         {
             var tok = Advance();

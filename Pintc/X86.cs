@@ -154,6 +154,9 @@ static class X86
     // xor eax, 1 — inverts a bool (0→1, 1→0)
     public static byte[] XorEaxOne() => [0x83, 0xF0, 0x01];
 
+    // xor eax, eax — zero EAX (cheaper than mov eax,0; used before SETcc)
+    public static byte[] XorEaxEax() => [0x33, 0xC0];
+
     // test eax, eax — sets ZF=1 if EAX is zero, ZF=0 otherwise
     public static byte[] TestEaxEax() => [0x85, 0xC0];
 
@@ -164,6 +167,50 @@ static class X86
     // jmp rel32 — unconditional jump; placeholder offset at bytes [1..4]
     public static byte[] JmpRel32() => [0xE9, 0x00, 0x00, 0x00, 0x00];
     public const int JmpRel32OffsetAt = 1;
+
+    // ── x87 FPU ─────────────────────────────────────────────────────────────────
+
+    // fld dword ptr [esp] / fld qword ptr [esp] — load float from top of CPU stack onto FPU stack
+    public static byte[] FldDwordPtrEsp() => [0xD9, 0x04, 0x24];
+    public static byte[] FldQwordPtrEsp() => [0xDD, 0x04, 0x24];
+
+    // fld dword ptr [ebp+disp8] / fld qword ptr [ebp+disp8] — load local float onto FPU stack
+    public static byte[] FldDwordEbpDisp8(sbyte disp) => [0xD9, 0x45, (byte)disp];
+    public static byte[] FldQwordEbpDisp8(sbyte disp) => [0xDD, 0x45, (byte)disp];
+
+    // fstp dword ptr [ebp+disp8] / fstp qword ptr [ebp+disp8] — pop FPU ST(0) into local slot
+    public static byte[] FstpDwordEbpDisp8(sbyte disp) => [0xD9, 0x5D, (byte)disp];
+    public static byte[] FstpQwordEbpDisp8(sbyte disp) => [0xDD, 0x5D, (byte)disp];
+
+    // fstp dword ptr [esp] / fstp qword ptr [esp] — pop FPU ST(0) onto top of CPU stack (for arg passing)
+    public static byte[] FstpDwordPtrEsp() => [0xD9, 0x1C, 0x24];
+    public static byte[] FstpQwordPtrEsp() => [0xDD, 0x1C, 0x24];
+
+    // faddp / fsubp / fmulp / fdivp — ST(1) op= ST(0), pop: result in new ST(0)
+    // Operand order: left was pushed first (now ST(1)), right pushed second (now ST(0)).
+    // fsubp: ST(1) - ST(0) = left - right. fdivp: ST(1) / ST(0) = left / right.
+    public static byte[] Faddp() => [0xDE, 0xC1];
+    public static byte[] Fsubp() => [0xDE, 0xE9];
+    public static byte[] Fmulp() => [0xDE, 0xC9];
+    public static byte[] Fdivp() => [0xDE, 0xF9];
+
+    // fchs — ST(0) = -ST(0)
+    public static byte[] Fchs() => [0xD9, 0xE0];
+
+    // fucompp — unordered compare ST(0) with ST(1), pop both; sets C0/C2/C3 in FPU status word.
+    // After fnstsw ax + sahf: CF=C0, ZF=C3. With ST(0)=right, ST(1)=left:
+    //   left < right → right > left → CF=0, ZF=0 → seta fires
+    //   left > right → right < left → CF=1       → setb fires
+    //   left == right             → ZF=1         → sete fires
+    public static byte[] Fucompp() => [0xDA, 0xE9];
+
+    // fnstsw ax — store FPU status word into AX (no-wait form; does not check pending exceptions)
+    public static byte[] FnstswAx() => [0xDF, 0xE0];
+
+    // sahf — load AH into EFLAGS SF/ZF/AF/PF/CF; bridges FPU C0/C2/C3 bits into integer flags
+    public static byte[] Sahf() => [0x9E];
+
+    // ────────────────────────────────────────────────────────────────────────────
 
     // Writes a 32-bit signed relative displacement into a previously emitted jump.
     // patchAt: byte index of the first byte of the 4-byte displacement field.

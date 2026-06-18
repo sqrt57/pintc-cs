@@ -1357,6 +1357,139 @@ public static class SliceFixtures
         }
         """;
 
+    public const string Slice23F64ArithmeticSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var sum: f64 = 1.0 + 2.0;
+                if (sum != 3.0) { exit_process(1); }
+                var diff: f64 = 5.5 - 2.5;
+                if (diff != 3.0) { exit_process(2); }
+                var prod: f64 = 2.5 * 4.0;
+                if (prod != 10.0) { exit_process(3); }
+                var quot: f64 = 10.0 / 4.0;
+                if (quot != 2.5) { exit_process(4); }
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice23F32ArithmeticSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var a: f32 = 1.0 + 2.0;
+                if (a != 3.0) { exit_process(1); }
+                var b: f32 = a * 2.0;
+                if (b != 6.0) { exit_process(2); }
+                var c: f32 = b - 1.5;
+                if (c != 4.5) { exit_process(3); }
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice23F64ComparisonSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                if (1.5 >= 2.5) { exit_process(1); }
+                if (3.0 <= 2.0) { exit_process(2); }
+                if (2.0 > 2.0)  { exit_process(3); }
+                if (2.0 < 2.0)  { exit_process(4); }
+                if (3.14 == 2.71) { exit_process(5); }
+                if (1.0 != 1.0)   { exit_process(6); }
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice23F64NegateSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var x: f64 = 3.0;
+                var neg: f64 = -x;
+                if (neg + 3.0 != 0.0) { exit_process(1); }
+                var y: f64 = -neg;
+                if (y != 3.0) { exit_process(2); }
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice23F64ExponentSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var big: f64 = 1.0e3;
+                if (big != 1000.0) { exit_process(1); }
+                var mid: f64 = 1.5e2;
+                if (mid != 150.0) { exit_process(2); }
+                var small: f64 = 2.5E1;
+                if (small != 25.0) { exit_process(3); }
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice23F64FunctionSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            fun average(a: f64, b: f64) -> f64 {
+                return (a + b) / 2.0;
+            }
+
+            fun scale(v: f64, factor: f64) -> f64 {
+                return v * factor;
+            }
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var avg: f64 = average(3.0, 5.0);
+                if (avg != 4.0) { exit_process(1); }
+                var s: f64 = scale(2.5, 4.0);
+                if (s != 10.0) { exit_process(2); }
+                exit_process(0);
+            }
+        }
+        """;
+
     // Demonstrates the re-evaluation bug: const initializer is a call whose side
     // effect is visible through a pointer. With the bug the call runs once per use
     // (a=1, b=2). With the fix it runs once at the declaration (a=1, b=1).

@@ -231,6 +231,7 @@ static class Codegen
         }
         if (recordMap.TryGetValue(typeName, out var rec))
             return rec.Fields.Sum(f => StackSlotSize(f.TypeName, recordMap));
+        if (typeName == "f64") return 8;
         return 4;
     }
 
@@ -264,10 +265,14 @@ static class Codegen
 
     static string? GetExprType(Expr expr, Dictionary<string, string> types) => expr switch
     {
+        FloatLiteralExpr                                      => "f64",
         VarRefExpr v when types.TryGetValue(v.Name, out var t) => t,
-        BinaryExpr { Op: BinaryOp.Add or BinaryOp.Sub } b => GetExprType(b.Left, types),
+        BinaryExpr b => GetExprType(b.Left, types) ?? GetExprType(b.Right, types),
+        UnaryExpr u  => GetExprType(u.Operand, types),
         _ => null,
     };
+
+    static bool IsFloatType(string? t) => t is "f32" or "f64";
 
     static int ResolveRecordFieldByteOffset(
         string recordTypeName,
@@ -517,16 +522,17 @@ static class Codegen
 
         // Parameters: positive EBP offsets.
         // For multi-return functions the hidden pointer occupies [EBP+8]; user params start at [EBP+12].
-        int paramBase = isMultiReturn ? 12 : 8;
+        int paramOff = isMultiReturn ? 12 : 8;
         for (int i = 0; i < fun.Params.Count; i++)
         {
-            offsets[fun.Params[i].Name] = paramBase + i * 4;
+            offsets[fun.Params[i].Name] = paramOff;
             types[fun.Params[i].Name]   = fun.Params[i].TypeName;
+            paramOff += StackSlotSize(fun.Params[i].TypeName, recordMap);
         }
 
         // stdcall cleanup size includes the hidden pointer slot when applicable.
         int paramStackBytes = isStdcall
-            ? ((isMultiReturn ? 1 : 0) + fun.Params.Count) * 4
+            ? (isMultiReturn ? 4 : 0) + fun.Params.Sum(p => StackSlotSize(p.TypeName, recordMap))
             : 0;
 
         bool needsFrame = !isEntryPoint || localBytes > 0;
@@ -684,6 +690,15 @@ static class Codegen
 
     static void EmitAssignStmt(AssignStmt stmt, FunCtx ctx)
     {
+        if (ctx.Types.TryGetValue(stmt.Name, out var assignType) && IsFloatType(assignType))
+        {
+            EmitExprFloat(stmt.Value, ctx, assignType);
+            int assignSlot = ctx.Offsets[stmt.Name];
+            ctx.Code.AddRange(assignType == "f64"
+                ? X86.FstpQwordEbpDisp8((sbyte)assignSlot)
+                : X86.FstpDwordEbpDisp8((sbyte)assignSlot));
+            return;
+        }
         EmitExpr(stmt.Value, ctx);
         ctx.Code.AddRange(X86.PopToEbpDisp8((sbyte)ctx.Offsets[stmt.Name]));
     }
@@ -853,6 +868,15 @@ static class Codegen
             EmitRecordLiteralInto(recLit, decl.TypeName, ctx.Offsets[decl.Name], ctx);
             return;
         }
+        if (IsFloatType(decl.TypeName))
+        {
+            EmitExprFloat(decl.Init, ctx, decl.TypeName);
+            int floatSlot = ctx.Offsets[decl.Name];
+            ctx.Code.AddRange(decl.TypeName == "f64"
+                ? X86.FstpQwordEbpDisp8((sbyte)floatSlot)
+                : X86.FstpDwordEbpDisp8((sbyte)floatSlot));
+            return;
+        }
         EmitExpr(decl.Init, ctx);
         ctx.Code.AddRange(X86.PopToEbpDisp8((sbyte)ctx.Offsets[decl.Name]));
     }
@@ -914,6 +938,11 @@ static class Codegen
                 else
                     ctx.Code.AddRange(X86.MovMemEcxDisp8Eax((sbyte)(i * 4)));
             }
+        }
+        else if (IsFloatType(ctx.ReturnType) && values.Count == 1)
+        {
+            EmitExprFloat(values[0], ctx, ctx.ReturnType);
+            // result stays in ST(0) for the caller; fall through to epilogue
         }
         else if (values.Count == 1)
         {
@@ -1245,8 +1274,23 @@ static class Codegen
                 ctx.Code.AddRange(X86.PushEax());
                 break;
             case BinaryExpr b: {
+                string? leftInferred  = GetExprType(b.Left, ctx.Types);
+                string? rightInferred = GetExprType(b.Right, ctx.Types);
+                string? floatType     = IsFloatType(leftInferred)  ? leftInferred
+                                      : IsFloatType(rightInferred) ? rightInferred
+                                      : null;
+                if (floatType is not null)
+                {
+                    if (b.Op is BinaryOp.Lt or BinaryOp.Gt or BinaryOp.Le or BinaryOp.Ge
+                             or BinaryOp.Eq or BinaryOp.Ne)
+                    {
+                        EmitFloatCmpToEax(b, ctx, floatType);
+                        break;
+                    }
+                    throw new InvalidOperationException("Float arithmetic must be emitted via EmitExprFloat");
+                }
                 string? leftType = (b.Op is BinaryOp.Add or BinaryOp.Sub)
-                    ? GetExprType(b.Left, ctx.Types) : null;
+                    ? leftInferred : null;
                 EmitExpr(b.Left, ctx);
                 EmitExpr(b.Right, ctx);
                 ctx.Code.AddRange(X86.PopEcx()); // right
@@ -1374,5 +1418,138 @@ static class Codegen
             case BinaryOp.Ge:
                 code.AddRange(X86.CmpEaxEcx()); code.AddRange(X86.SetaeAl()); code.AddRange(X86.MovzxEaxAl()); code.AddRange(X86.PushEax()); break;
         }
+    }
+
+    // Emit a float expression; result ends up in FPU ST(0). Never touches EAX.
+    static void EmitExprFloat(Expr expr, FunCtx ctx, string typeName)
+    {
+        bool isF64 = typeName == "f64";
+        switch (expr)
+        {
+            case FloatLiteralExpr f:
+                if (isF64)
+                {
+                    long bits = BitConverter.DoubleToInt64Bits(f.Value);
+                    uint lo = (uint)(bits & 0xFFFF_FFFF);
+                    uint hi = (uint)((ulong)bits >> 32);
+                    ctx.Code.AddRange(X86.PushImm32(hi));
+                    ctx.Code.AddRange(X86.PushImm32(lo));
+                    ctx.Code.AddRange(X86.FldQwordPtrEsp());
+                    ctx.Code.AddRange(X86.AddEspImm8(8));
+                }
+                else
+                {
+                    uint bits = BitConverter.SingleToUInt32Bits((float)f.Value);
+                    ctx.Code.AddRange(X86.PushImm32(bits));
+                    ctx.Code.AddRange(X86.FldDwordPtrEsp());
+                    ctx.Code.AddRange(X86.AddEspImm8(4));
+                }
+                break;
+
+            case VarRefExpr v:
+            {
+                int off = ctx.Offsets[v.Name];
+                string vType = ctx.Types[v.Name];
+                ctx.Code.AddRange(vType == "f64"
+                    ? X86.FldQwordEbpDisp8((sbyte)off)
+                    : X86.FldDwordEbpDisp8((sbyte)off));
+                break;
+            }
+
+            case BinaryExpr b when b.Op is BinaryOp.Add or BinaryOp.Sub or BinaryOp.Mul or BinaryOp.Div:
+                EmitExprFloat(b.Left, ctx, typeName);
+                EmitExprFloat(b.Right, ctx, typeName);
+                ctx.Code.AddRange(b.Op switch
+                {
+                    BinaryOp.Add => X86.Faddp(),
+                    BinaryOp.Sub => X86.Fsubp(),
+                    BinaryOp.Mul => X86.Fmulp(),
+                    BinaryOp.Div => X86.Fdivp(),
+                    _            => throw new InvalidOperationException("unreachable")
+                });
+                break;
+
+            case UnaryExpr { Op: UnaryOp.Neg } u:
+                EmitExprFloat(u.Operand, ctx, typeName);
+                ctx.Code.AddRange(X86.Fchs());
+                break;
+
+            case CallExpr callExpr:
+                EmitFloatCall(callExpr, ctx, typeName);
+                break;
+
+            default:
+                throw new InvalidOperationException($"Unsupported float expr: {expr.GetType().Name}");
+        }
+    }
+
+    // Emit a float comparison; result is 0 or 1 in EAX, pushed onto the stack.
+    static void EmitFloatCmpToEax(BinaryExpr b, FunCtx ctx, string floatType)
+    {
+        EmitExprFloat(b.Left, ctx, floatType);   // ST(0) = left
+        EmitExprFloat(b.Right, ctx, floatType);  // ST(0) = right, ST(1) = left
+        ctx.Code.AddRange(X86.Fucompp());        // compare; pop both; C0/C3 → CF/ZF via SAHF
+        ctx.Code.AddRange(X86.FnstswAx());
+        ctx.Code.AddRange(X86.Sahf());
+        // ST(0)=right, ST(1)=left after push order; flags after SAHF:
+        //   CF=1 if right < left;  ZF=1 if right == left;  CF=0,ZF=0 if right > left
+        ctx.Code.AddRange(b.Op switch
+        {
+            BinaryOp.Lt => X86.SetaAl(),   // left < right  ↔  right > left  → !CF & !ZF
+            BinaryOp.Gt => X86.SetbAl(),   // left > right  ↔  right < left  → CF=1
+            BinaryOp.Eq => X86.SeteAl(),   // left == right ↔  right == left → ZF=1
+            BinaryOp.Ne => X86.SetneAl(),  // left != right ↔  right != left → ZF=0
+            BinaryOp.Le => X86.SetaeAl(),  // left <= right ↔  right >= left → !CF
+            BinaryOp.Ge => X86.SetbeAl(),  // left >= right ↔  right <= left → CF|ZF
+            _           => throw new InvalidOperationException("unreachable")
+        });
+        ctx.Code.AddRange(X86.MovzxEaxAl());
+        ctx.Code.AddRange(X86.PushEax());
+    }
+
+    // Emit a call to a local Pint function in a float context (args may be float or int).
+    // Result is left in ST(0); never pushes to the integer stack.
+    static void EmitFloatCall(CallExpr callExpr, FunCtx ctx, string retType)
+    {
+        var args = callExpr.ArgNames is not null ? ReorderArgs(callExpr, ctx) : callExpr.Args;
+        var paramList = ctx.FunParamLists.GetValueOrDefault(callExpr.Name);
+
+        int totalArgBytes = 0;
+        for (int i = args.Count - 1; i >= 0; i--)
+        {
+            string paramType = paramList?[i].TypeName ?? "i32";
+            if (IsFloatType(paramType))
+            {
+                int argBytes = paramType == "f64" ? 8 : 4;
+                EmitExprFloat(args[i], ctx, paramType);
+                ctx.Code.AddRange(X86.SubEspImm8((byte)argBytes));
+                ctx.Code.AddRange(paramType == "f64" ? X86.FstpQwordPtrEsp() : X86.FstpDwordPtrEsp());
+                totalArgBytes += argBytes;
+            }
+            else
+            {
+                EmitExpr(args[i], ctx);
+                totalArgBytes += 4;
+            }
+        }
+
+        ctx.Code.AddRange(X86.CallRel32());
+        int patchOffset = ctx.Code.Count - 4;
+
+        string targetModule;
+        if (callExpr.Qualifier is not null)
+        {
+            if (!ctx.AliasMap.TryGetValue(callExpr.Qualifier, out targetModule!))
+                throw new InvalidOperationException($"Unknown import alias '{callExpr.Qualifier}'");
+        }
+        else
+            targetModule = ctx.ModuleName;
+
+        ctx.LocalCallRefs.Add(new LocalCallRef(patchOffset, targetModule, callExpr.Name));
+
+        if (totalArgBytes > 0)
+            ctx.Code.AddRange(X86.AddEspImm8((byte)totalArgBytes));
+
+        // Result is in ST(0); no integer stack manipulation needed.
     }
 }
