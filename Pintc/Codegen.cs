@@ -28,7 +28,9 @@ record FunCtx(
     Dictionary<string, List<string?>>   FunReturnNames, // funcName → return names for named-return funs
     Dictionary<MultiVarDecl, int>       RetBufOffsets,  // multi-var decl → buffer start EBP offset
     Dictionary<string, List<Param>>     FunParamLists,  // funcName → params, for named-arg reordering
-    Dictionary<string, EnumInfo>        EnumMap);       // enumName → evaluated variant values
+    Dictionary<string, EnumInfo>        EnumMap,        // enumName → evaluated variant values
+    Dictionary<string, List<int>>       LabeledBreakPatches,    // label → break patch sites
+    Dictionary<string, List<int>>       LabeledContinuePatches); // label → continue patch sites
 
 static class Codegen
 {
@@ -543,7 +545,9 @@ static class Codegen
                              new Dictionary<string, Expr>(moduleConsts), rdataBytes,
                              fun.ReturnType, fun.ReturnNames ?? [],
                              funReturnTypes, funReturnNames, retBufOffsets, funParamLists,
-                             enumMap);
+                             enumMap,
+                             new Dictionary<string, List<int>>(),
+                             new Dictionary<string, List<int>>());
 
         EmitStmts(fun.Body, ctx);
 
@@ -628,13 +632,19 @@ static class Codegen
                 case LoopStmt loopStmt:
                     EmitLoopStmt(loopStmt, ctx);
                     break;
-                case BreakStmt:
+                case BreakStmt bs:
                     ctx.Code.AddRange(X86.JmpRel32());
-                    breakPatches!.Add(ctx.Code.Count - 4);
+                    if (bs.Label is not null)
+                        ctx.LabeledBreakPatches[bs.Label].Add(ctx.Code.Count - 4);
+                    else
+                        breakPatches!.Add(ctx.Code.Count - 4);
                     break;
-                case ContinueStmt:
+                case ContinueStmt cs:
                     ctx.Code.AddRange(X86.JmpRel32());
-                    continuePatches!.Add(ctx.Code.Count - 4);
+                    if (cs.Label is not null)
+                        ctx.LabeledContinuePatches[cs.Label].Add(ctx.Code.Count - 4);
+                    else
+                        continuePatches!.Add(ctx.Code.Count - 4);
                     break;
             }
         }
@@ -720,6 +730,14 @@ static class Codegen
 
     static void EmitWhileStmt(WhileStmt whileStmt, FunCtx ctx)
     {
+        var breakPatches    = new List<int>();
+        var continuePatches = new List<int>();
+        if (whileStmt.Label is not null)
+        {
+            ctx.LabeledBreakPatches[whileStmt.Label]    = breakPatches;
+            ctx.LabeledContinuePatches[whileStmt.Label] = continuePatches;
+        }
+
         int whileTop = ctx.Code.Count;
 
         EmitExpr(whileStmt.Condition, ctx);
@@ -727,9 +745,6 @@ static class Codegen
         ctx.Code.AddRange(X86.TestEaxEax());
         ctx.Code.AddRange(X86.JzRel32());
         int jzPatch = ctx.Code.Count - 4;
-
-        var breakPatches    = new List<int>();
-        var continuePatches = new List<int>();
 
         EmitStmts(whileStmt.Body, ctx, breakPatches, continuePatches);
 
@@ -740,10 +755,24 @@ static class Codegen
 
         X86.Backpatch(ctx.Code, jzPatch, ctx.Code.Count);
         foreach (var p in breakPatches) X86.Backpatch(ctx.Code, p, ctx.Code.Count);
+
+        if (whileStmt.Label is not null)
+        {
+            ctx.LabeledBreakPatches.Remove(whileStmt.Label);
+            ctx.LabeledContinuePatches.Remove(whileStmt.Label);
+        }
     }
 
     static void EmitForStmt(ForStmt forStmt, FunCtx ctx)
     {
+        var breakPatches    = new List<int>();
+        var continuePatches = new List<int>();
+        if (forStmt.Label is not null)
+        {
+            ctx.LabeledBreakPatches[forStmt.Label]    = breakPatches;
+            ctx.LabeledContinuePatches[forStmt.Label] = continuePatches;
+        }
+
         EmitExpr(forStmt.VarInit, ctx);
         ctx.Code.AddRange(X86.PopToEbpDisp8((sbyte)ctx.Offsets[forStmt.VarName]));
 
@@ -753,9 +782,6 @@ static class Codegen
         ctx.Code.AddRange(X86.TestEaxEax());
         ctx.Code.AddRange(X86.JzRel32());
         int jzPatch = ctx.Code.Count - 4;
-
-        var breakPatches    = new List<int>();
-        var continuePatches = new List<int>();
 
         EmitStmts(forStmt.Body, ctx, breakPatches, continuePatches);
 
@@ -770,14 +796,25 @@ static class Codegen
 
         X86.Backpatch(ctx.Code, jzPatch, ctx.Code.Count);
         foreach (var p in breakPatches) X86.Backpatch(ctx.Code, p, ctx.Code.Count);
+
+        if (forStmt.Label is not null)
+        {
+            ctx.LabeledBreakPatches.Remove(forStmt.Label);
+            ctx.LabeledContinuePatches.Remove(forStmt.Label);
+        }
     }
 
     static void EmitLoopStmt(LoopStmt loopStmt, FunCtx ctx)
     {
-        int loopTop = ctx.Code.Count;
-
         var breakPatches    = new List<int>();
         var continuePatches = new List<int>();
+        if (loopStmt.Label is not null)
+        {
+            ctx.LabeledBreakPatches[loopStmt.Label]    = breakPatches;
+            ctx.LabeledContinuePatches[loopStmt.Label] = continuePatches;
+        }
+
+        int loopTop = ctx.Code.Count;
 
         EmitStmts(loopStmt.Body, ctx, breakPatches, continuePatches);
 
@@ -787,6 +824,12 @@ static class Codegen
         X86.Backpatch(ctx.Code, ctx.Code.Count - 4, loopTop);
 
         foreach (var p in breakPatches) X86.Backpatch(ctx.Code, p, ctx.Code.Count);
+
+        if (loopStmt.Label is not null)
+        {
+            ctx.LabeledBreakPatches.Remove(loopStmt.Label);
+            ctx.LabeledContinuePatches.Remove(loopStmt.Label);
+        }
     }
 
     static void EmitLocalVarDecl(LocalVarDecl decl, FunCtx ctx)

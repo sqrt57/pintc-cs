@@ -508,6 +508,16 @@ class Parser(List<Token> tokens)
             return ParseBreakStmt();
         if (Check(TokenKind.Continue))
             return ParseContinueStmt();
+        // Labeled loop: ident ':' (while | for | loop)
+        if (Check(TokenKind.Ident) && Peek().Kind == TokenKind.Colon
+            && (PeekAt(2).Kind == TokenKind.While || PeekAt(2).Kind == TokenKind.For || PeekAt(2).Kind == TokenKind.Loop))
+        {
+            string label = Advance().Text; // consume ident
+            Advance();                     // consume ':'
+            if (Check(TokenKind.While)) return ParseWhileStmt(label);
+            if (Check(TokenKind.For))   return ParseForStmt(label);
+            return ParseLoopStmt(label);
+        }
         if (Check(TokenKind.Const))
             return ParseLocalConstDecl();
         if (Check(TokenKind.Ident) && Peek().Kind == TokenKind.Dot)
@@ -566,7 +576,7 @@ class Parser(List<Token> tokens)
         return new IfStmt(cond, then, elseBranch);
     }
 
-    WhileStmt? ParseWhileStmt()
+    WhileStmt? ParseWhileStmt(string? label = null)
     {
         if (Eat(TokenKind.While) is null) return null;
         if (Eat(TokenKind.LParen) is null) return null;
@@ -575,10 +585,10 @@ class Parser(List<Token> tokens)
         if (Eat(TokenKind.RParen) is null) return null;
         var body = ParseBlock();
         if (body is null) return null;
-        return new WhileStmt(cond, body);
+        return new WhileStmt(cond, body, label);
     }
 
-    ForStmt? ParseForStmt()
+    ForStmt? ParseForStmt(string? label = null)
     {
         if (Eat(TokenKind.For) is null) return null;
         if (Eat(TokenKind.LParen) is null) return null;
@@ -613,29 +623,33 @@ class Parser(List<Token> tokens)
         var body = ParseBlock();
         if (body is null) return null;
 
-        return new ForStmt(varName.Text, varType, varInit, cond, postName.Text, postValue, body);
+        return new ForStmt(varName.Text, varType, varInit, cond, postName.Text, postValue, body, label);
     }
 
-    LoopStmt? ParseLoopStmt()
+    LoopStmt? ParseLoopStmt(string? label = null)
     {
         if (Eat(TokenKind.Loop) is null) return null;
         var body = ParseBlock();
         if (body is null) return null;
-        return new LoopStmt(body);
+        return new LoopStmt(body, label);
     }
 
     BreakStmt? ParseBreakStmt()
     {
         if (Eat(TokenKind.Break) is null) return null;
+        string? label = null;
+        if (Check(TokenKind.Ident)) { label = Current.Text; Advance(); }
         if (Eat(TokenKind.Semicolon) is null) return null;
-        return new BreakStmt();
+        return new BreakStmt(label);
     }
 
     ContinueStmt? ParseContinueStmt()
     {
         if (Eat(TokenKind.Continue) is null) return null;
+        string? label = null;
+        if (Check(TokenKind.Ident)) { label = Current.Text; Advance(); }
         if (Eat(TokenKind.Semicolon) is null) return null;
-        return new ContinueStmt();
+        return new ContinueStmt(label);
     }
 
     FieldAssignStmt? ParseFieldAssignStmt()

@@ -1259,6 +1259,104 @@ public static class SliceFixtures
         }
         """;
 
+    public const string Slice22BreakOuterWhileSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var x: u32 = 0;
+                outer: while (x < 10) {
+                    for (var i: u32 = 0; i < 5; i = i + 1) {
+                        if (i == 2) { break outer; }
+                    }
+                    x = x + 1;
+                }
+                if (x != 0) { exit_process(1); }
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice22ContinueOuterSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var count: u32 = 0;
+                var j: u32 = 0;
+                accum: while (j < 3) {
+                    j = j + 1;
+                    for (var k: u32 = 0; k < 5; k = k + 1) {
+                        if (k == 1) { continue accum; }
+                        count = count + 1;
+                    }
+                }
+                if (count != 3) { exit_process(1); }
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice22LabeledForSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var found: u32 = 99;
+                search: for (var a: u32 = 0; a < 4; a = a + 1) {
+                    for (var b: u32 = 0; b < 4; b = b + 1) {
+                        if (a == 2 and b == 1) {
+                            found = a;
+                            break search;
+                        }
+                    }
+                }
+                if (found != 2) { exit_process(1); }
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice22LabeledLoopSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var n: u32 = 0;
+                scan: loop {
+                    for (var c: u32 = 0; c < 5; c = c + 1) {
+                        if (c == 3) {
+                            n = c;
+                            break scan;
+                        }
+                    }
+                }
+                if (n != 3) { exit_process(1); }
+                exit_process(0);
+            }
+        }
+        """;
+
     // Demonstrates the re-evaluation bug: const initializer is a call whose side
     // effect is visible through a pointer. With the bug the call runs once per use
     // (a=1, b=2). With the fix it runs once at the declaration (a=1, b=1).

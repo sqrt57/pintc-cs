@@ -61,11 +61,11 @@ record FieldAssignStmt(string VarName, List<string> Path, Expr Value) : Stmt;
 record DerefAssignStmt(Expr Ptr, Expr Value) : Stmt;
 record ArrowAssignStmt(Expr Ptr, string Field, Expr Value) : Stmt;
 record IfStmt(Expr Condition, List<Stmt> Then, List<Stmt>? Else) : Stmt;
-record WhileStmt(Expr Condition, List<Stmt> Body) : Stmt;
-record LoopStmt(List<Stmt> Body) : Stmt;
-record BreakStmt : Stmt;
-record ContinueStmt : Stmt;
-record ForStmt(string VarName, string VarTypeName, Expr VarInit, Expr Condition, string PostName, Expr PostValue, List<Stmt> Body) : Stmt;
+record WhileStmt(Expr Condition, List<Stmt> Body, string? Label = null) : Stmt;
+record LoopStmt(List<Stmt> Body, string? Label = null) : Stmt;
+record BreakStmt(string? Label = null) : Stmt;
+record ContinueStmt(string? Label = null) : Stmt;
+record ForStmt(string VarName, string VarTypeName, Expr VarInit, Expr Condition, string PostName, Expr PostValue, List<Stmt> Body, string? Label = null) : Stmt;
 record LocalConstDecl(string Name, string TypeName, Expr Init) : Stmt;
 // var (a: T, _) = call(); — introduces new locals from a multi-return call.
 // Items: (Name=null, TypeName=null) for discard (_), (Name, TypeName) otherwise.
