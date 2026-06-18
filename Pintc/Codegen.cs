@@ -779,8 +779,32 @@ static class Codegen
             }
             return;
         }
+        if (decl.Init is RecordLiteralExpr recLit)
+        {
+            EmitRecordLiteralInto(recLit, decl.TypeName, ctx.Offsets[decl.Name], ctx);
+            return;
+        }
         EmitExpr(decl.Init, ctx);
         ctx.Code.AddRange(X86.PopToEbpDisp8((sbyte)ctx.Offsets[decl.Name]));
+    }
+
+    static void EmitRecordLiteralInto(RecordLiteralExpr lit, string typeName, int baseOff, FunCtx ctx)
+    {
+        var rec = ctx.RecordMap[typeName];
+        int fieldOff = 0;
+        foreach (var declField in rec.Fields)
+        {
+            var (_, value) = lit.Fields.First(f => f.Field == declField.Name);
+            int slotOff = baseOff + fieldOff;
+            if (value is RecordLiteralExpr nested)
+                EmitRecordLiteralInto(nested, declField.TypeName, slotOff, ctx);
+            else
+            {
+                EmitExpr(value, ctx);
+                ctx.Code.AddRange(X86.PopToEbpDisp8((sbyte)slotOff));
+            }
+            fieldOff += StackSlotSize(declField.TypeName, ctx.RecordMap);
+        }
     }
 
     static void EmitCallStmt(CallStmt stmt, FunCtx ctx)

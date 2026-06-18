@@ -1186,6 +1186,22 @@ class Parser(List<Token> tokens)
             return new ArrayLiteralExpr(elements);
         }
 
+        if (Check(TokenKind.LBrace))
+        {
+            Advance();
+            var fields = new List<(string Field, Expr Value)>();
+            while (!Check(TokenKind.RBrace) && !Check(TokenKind.Eof))
+            {
+                var fn = Eat(TokenKind.Ident);  if (fn is null) return null;
+                if (Eat(TokenKind.Colon) is null) return null;
+                var fv = ParseExpr();           if (fv is null) return null;
+                fields.Add((fn.Text, fv));
+                if (!TryEat(TokenKind.Comma)) break;
+            }
+            if (Eat(TokenKind.RBrace) is null) return null;
+            return new RecordLiteralExpr(fields);
+        }
+
         if (Check(TokenKind.LParen))
         {
             Advance();

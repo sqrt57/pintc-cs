@@ -1094,6 +1094,82 @@ public static class SliceFixtures
         }
         """;
 
+    public const string Slice20Source = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            record Point {
+                x: u32;
+                y: u32;
+            }
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var p: Point = { x: 10, y: 20 };
+                if (p.x != 10) { exit_process(1); }
+                if (p.y != 20) { exit_process(2); }
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice20OutOfOrderSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            record Point {
+                x: u32;
+                y: u32;
+            }
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var q: Point = { y: 99, x: 42 };
+                if (q.x != 42) { exit_process(1); }
+                if (q.y != 99) { exit_process(2); }
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice20NestedSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            record Point {
+                x: u32;
+                y: u32;
+            }
+
+            record Line {
+                start: Point;
+                end:   Point;
+            }
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var ln: Line = { start: { x: 1, y: 2 }, end: { x: 5, y: 6 } };
+                if (ln.start.x != 1) { exit_process(1); }
+                if (ln.start.y != 2) { exit_process(2); }
+                if (ln.end.x   != 5) { exit_process(3); }
+                if (ln.end.y   != 6) { exit_process(4); }
+                exit_process(0);
+            }
+        }
+        """;
+
     // Demonstrates the re-evaluation bug: const initializer is a call whose side
     // effect is visible through a pointer. With the bug the call runs once per use
     // (a=1, b=2). With the fix it runs once at the declaration (a=1, b=1).

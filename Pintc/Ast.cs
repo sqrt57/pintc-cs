@@ -46,6 +46,7 @@ record ToTypeExpr(Expr Value, string TargetType) : Expr;
 record DivmodExpr(Expr A, Expr B) : Expr;
 record MulWideExpr(Expr A, Expr B) : Expr;
 record ArrayLiteralExpr(List<Expr> Elements) : Expr;
+record RecordLiteralExpr(List<(string Field, Expr Value)> Fields) : Expr;
 
 abstract record Stmt;
 record CallStmt(string Callee, List<Expr> Args) : Stmt;
