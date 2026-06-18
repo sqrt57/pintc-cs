@@ -1,6 +1,7 @@
 namespace Pintc;
 
 record LocalCallRef(int PatchOffset, string ModuleName, string FuncName);
+record EnumInfo(string UnderlyingType, Dictionary<string, long> Variants);
 
 // Per-function emit context: bundles all state shared across emit helpers.
 record FunCtx(
@@ -26,7 +27,8 @@ record FunCtx(
     Dictionary<string, string>          FunReturnTypes, // funcName → returnType for all Pint funs
     Dictionary<string, List<string?>>   FunReturnNames, // funcName → return names for named-return funs
     Dictionary<MultiVarDecl, int>       RetBufOffsets,  // multi-var decl → buffer start EBP offset
-    Dictionary<string, List<Param>>     FunParamLists); // funcName → params, for named-arg reordering
+    Dictionary<string, List<Param>>     FunParamLists,  // funcName → params, for named-arg reordering
+    Dictionary<string, EnumInfo>        EnumMap);       // enumName → evaluated variant values
 
 static class Codegen
 {
@@ -49,9 +51,11 @@ static class Codegen
         var allVars    = modules.SelectMany(m => m.Vars).ToList();
         var allRecords = modules.SelectMany(m => m.Records).ToList();
         var allConsts  = modules.SelectMany(m => m.Consts).ToList();
+        var allEnums   = modules.SelectMany(m => m.Enums).ToList();
 
         var importMap    = BuildImportMap(allExterns);
         var recordMap    = BuildRecordMap(allRecords);
+        var enumMap      = BuildEnumMap(allEnums);
         var rdataBytes   = new List<byte>();
         var moduleConsts = BuildModuleConstMap(allConsts, rdataBytes);
         bool hasRdata    = rdataBytes.Count > 0;
@@ -91,7 +95,7 @@ static class Codegen
                 {
                     funOffsets[(mod.Name, fun.Name)] = code.Count;
                     EmitFun(fun, mod.Name, moduleAliases[mod.Name],
-                            importMap, varVas, recordMap, moduleConsts, funReturnTypes, funReturnNames, funParamLists,
+                            importMap, varVas, recordMap, enumMap, moduleConsts, funReturnTypes, funReturnNames, funParamLists,
                             code, iatRefs, imports, localCallRefs, rdataBytes);
                 }
         }
@@ -110,7 +114,7 @@ static class Codegen
 
             funOffsets[(entryModule.Name, entryFun.Name)] = code.Count;
             EmitFun(entryFun, entryModule.Name, moduleAliases[entryModule.Name],
-                    importMap, varVas, recordMap, moduleConsts, funReturnTypes, funReturnNames, funParamLists,
+                    importMap, varVas, recordMap, enumMap, moduleConsts, funReturnTypes, funReturnNames, funParamLists,
                     code, iatRefs, imports, localCallRefs, rdataBytes);
 
             foreach (var mod in modules)
@@ -119,7 +123,7 @@ static class Codegen
                     if (fun == entryFun) continue;
                     funOffsets[(mod.Name, fun.Name)] = code.Count;
                     EmitFun(fun, mod.Name, moduleAliases[mod.Name],
-                            importMap, varVas, recordMap, moduleConsts, funReturnTypes, funReturnNames, funParamLists,
+                            importMap, varVas, recordMap, enumMap, moduleConsts, funReturnTypes, funReturnNames, funParamLists,
                             code, iatRefs, imports, localCallRefs, rdataBytes);
                 }
         }
@@ -190,6 +194,26 @@ static class Codegen
         var map = new Dictionary<string, RecordDecl>();
         foreach (var rec in records)
             map[rec.Name] = rec;
+        return map;
+    }
+
+    static Dictionary<string, EnumInfo> BuildEnumMap(List<EnumDecl> enums)
+    {
+        var map = new Dictionary<string, EnumInfo>();
+        foreach (var e in enums)
+        {
+            var variants = new Dictionary<string, long>();
+            long maxSoFar = -1;
+            foreach (var v in e.Variants)
+            {
+                long val = v.Value is IntLiteralExpr lit
+                    ? lit.Value
+                    : Math.Max(0, maxSoFar + 1);
+                maxSoFar     = Math.Max(maxSoFar, val);
+                variants[v.Name] = val;
+            }
+            map[e.Name] = new EnumInfo(e.UnderlyingType ?? "i32", variants);
+        }
         return map;
     }
 
@@ -466,6 +490,7 @@ static class Codegen
         Dictionary<string, ImportSpec> importMap,
         Dictionary<string, uint> varVas,
         Dictionary<string, RecordDecl> recordMap,
+        Dictionary<string, EnumInfo> enumMap,
         Dictionary<string, Expr> moduleConsts,
         Dictionary<string, string> funReturnTypes,
         Dictionary<string, List<string?>> funReturnNames,
@@ -517,7 +542,8 @@ static class Codegen
                              localBytes, needsFrame, isStdcall, paramStackBytes,
                              new Dictionary<string, Expr>(moduleConsts), rdataBytes,
                              fun.ReturnType, fun.ReturnNames ?? [],
-                             funReturnTypes, funReturnNames, retBufOffsets, funParamLists);
+                             funReturnTypes, funReturnNames, retBufOffsets, funParamLists,
+                             enumMap);
 
         EmitStmts(fun.Body, ctx);
 
@@ -1111,6 +1137,15 @@ static class Codegen
                 else
                     throw new InvalidOperationException($"Unknown string field '{string.Join(".", fa.Path)}' on '{fa.VarName}'");
                 break;
+            case FieldAccessExpr fa when ctx.EnumMap.TryGetValue(fa.VarName, out var enumInfo):
+            {
+                if (fa.Path.Count != 1 || !enumInfo.Variants.TryGetValue(fa.Path[0], out long enumVal))
+                    throw new InvalidOperationException($"'{fa.VarName}.{string.Join(".", fa.Path)}' is not a valid enum member");
+                ctx.Code.AddRange(enumVal is >= 0 and <= 127
+                    ? X86.PushImm8((byte)enumVal)
+                    : X86.PushImm32((uint)enumVal));
+                break;
+            }
             case FieldAccessExpr fa:
                 int fieldOffset = ResolveFieldByteOffset(fa.VarName, fa.Path, ctx.Types, ctx.RecordMap);
                 ctx.Code.AddRange(X86.PushEbpDisp8((sbyte)(ctx.Offsets[fa.VarName] + fieldOffset)));
@@ -1190,7 +1225,10 @@ static class Codegen
             {
                 EmitExpr(cast.Value, ctx);
                 ctx.Code.AddRange(X86.PopEax());
-                switch (cast.TargetType)
+                string castTarget = ctx.EnumMap.TryGetValue(cast.TargetType, out var castEnumInfo)
+                    ? castEnumInfo.UnderlyingType
+                    : cast.TargetType;
+                switch (castTarget)
                 {
                     case "u8":  ctx.Code.AddRange(X86.AndEaxImm32(0xFF));   break;
                     case "u16": ctx.Code.AddRange(X86.AndEaxImm32(0xFFFF)); break;

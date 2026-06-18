@@ -83,6 +83,9 @@ record MultiAssignStmt(List<string?> Names, Expr Call, List<string?>? ReturnName
 record RecordField(string Name, string TypeName);
 record RecordDecl(string Name, List<RecordField> Fields);
 
+record EnumVariant(string Name, Expr? Value);
+record EnumDecl(string Name, string? UnderlyingType, List<EnumVariant> Variants);
+
 // An extern function imported from a DLL.
 record ExternFunDecl(
     List<Attr> Attributes,
@@ -120,14 +123,15 @@ record ModuleDecl(
     List<RecordDecl> Records,
     List<ImportDecl> Imports,
     List<string> Exports,
-    List<ModuleConstDecl> Consts)
+    List<ModuleConstDecl> Consts,
+    List<EnumDecl> Enums)
 {
-    // Backwards-compatible constructor for test fixtures that don't use import/export/consts.
+    // Backwards-compatible constructor for test fixtures that don't use import/export/consts/enums.
     public ModuleDecl(
         string Name,
         List<ExternFunDecl> Externs,
         List<FunDecl> Funs,
         List<ModuleVarDecl> Vars,
         List<RecordDecl> Records)
-        : this(Name, Externs, Funs, Vars, Records, [], [], []) { }
+        : this(Name, Externs, Funs, Vars, Records, [], [], [], []) { }
 }

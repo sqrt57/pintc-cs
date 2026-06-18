@@ -65,6 +65,7 @@ class Parser(List<Token> tokens)
         var imports = new List<ImportDecl>();
         var exports = new List<string>();
         var consts  = new List<ModuleConstDecl>();
+        var enums   = new List<EnumDecl>();
 
         while (!Check(TokenKind.RBrace) && !Check(TokenKind.Eof))
         {
@@ -111,15 +112,21 @@ class Parser(List<Token> tokens)
                 if (c is null) return null;
                 consts.Add(c);
             }
+            else if (Check(TokenKind.Enum))
+            {
+                var e = ParseEnumDecl();
+                if (e is null) return null;
+                enums.Add(e);
+            }
             else
             {
-                Error($"expected 'extern', 'fun', 'record', 'var', 'const', 'import', or 'export', got '{Current.Text}'");
+                Error($"expected 'extern', 'fun', 'record', 'enum', 'var', 'const', 'import', or 'export', got '{Current.Text}'");
                 return null;
             }
         }
 
         if (Eat(TokenKind.RBrace) is null) return null;
-        return new ModuleDecl(name.Text, externs, funs, vars, records, imports, exports, consts);
+        return new ModuleDecl(name.Text, externs, funs, vars, records, imports, exports, consts, enums);
     }
 
     // ── Attributes ─────────────────────────────────────────────────────────────
@@ -199,6 +206,36 @@ class Parser(List<Token> tokens)
         }
         if (Eat(TokenKind.RBrace) is null) return null;
         return new RecordDecl(name.Text, fields);
+    }
+
+    EnumDecl? ParseEnumDecl()
+    {
+        if (Eat(TokenKind.Enum) is null) return null;
+        var name = Eat(TokenKind.Ident);
+        if (name is null) return null;
+        string? underlyingType = null;
+        if (TryEat(TokenKind.Colon))
+        {
+            underlyingType = ParseType();
+            if (underlyingType is null) return null;
+        }
+        if (Eat(TokenKind.LBrace) is null) return null;
+        var variants = new List<EnumVariant>();
+        while (!Check(TokenKind.RBrace) && !Check(TokenKind.Eof))
+        {
+            var vname = Eat(TokenKind.Ident);
+            if (vname is null) return null;
+            Expr? value = null;
+            if (TryEat(TokenKind.Eq))
+            {
+                value = ParseExpr();
+                if (value is null) return null;
+            }
+            if (Eat(TokenKind.Comma) is null) return null;
+            variants.Add(new EnumVariant(vname.Text, value));
+        }
+        if (Eat(TokenKind.RBrace) is null) return null;
+        return new EnumDecl(name.Text, underlyingType, variants);
     }
 
     ExternFunDecl? ParseExternFunDecl(List<Attr> attrs)

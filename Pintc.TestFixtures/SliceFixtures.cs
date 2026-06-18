@@ -1170,6 +1170,95 @@ public static class SliceFixtures
         }
         """;
 
+    public const string Slice21BasicSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            enum Direction { North, South, East, West, }
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var d: Direction = Direction.North;
+                if (d != Direction.North) { exit_process(1); }
+                if (d == Direction.South) { exit_process(2); }
+                var e: Direction = Direction.West;
+                if (e == Direction.North) { exit_process(3); }
+                if (e != Direction.West)  { exit_process(4); }
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice21ExplicitValuesSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            enum Color { Red = 10, Green, Blue, }   // Green=11, Blue=12
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var c: Color = Color.Green;
+                if (c != Color.Green) { exit_process(1); }
+                var i: i32 = cast(c, i32);
+                if (i != 11) { exit_process(2); }
+                var r: Color = Color.Red;
+                var ri: i32 = cast(r, i32);
+                if (ri != 10) { exit_process(3); }
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice21CastFromIntSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            enum Direction { North, South, East, West, }   // 0, 1, 2, 3
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var d: Direction = cast(2, Direction);   // East
+                if (d != Direction.East) { exit_process(1); }
+                var d2: Direction = cast(0, Direction);  // North
+                if (d2 != Direction.North) { exit_process(2); }
+                exit_process(0);
+            }
+        }
+        """;
+
+    public const string Slice21UnderlyingTypeSource = """
+        module main {
+
+            [dll_import(dll="kernel32.dll", entry_point="ExitProcess")]
+            [noreturn]
+            extern fun exit_process(code: u32) -> ();
+
+            enum Flags : u8 { Read = 4, Write = 2, Exec = 1, }
+
+            [win32_entry]
+            [noreturn]
+            fun main() -> () {
+                var f: Flags = Flags.Read;
+                if (f != Flags.Read) { exit_process(1); }
+                var v: u8 = cast(f, u8);
+                if (v != 4) { exit_process(2); }
+                exit_process(0);
+            }
+        }
+        """;
+
     // Demonstrates the re-evaluation bug: const initializer is a call whose side
     // effect is visible through a pointer. With the bug the call runs once per use
     // (a=1, b=2). With the fix it runs once at the declaration (a=1, b=1).
